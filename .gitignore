@@ -4,3 +4,4 @@
 /arch/*.pkg.tar.*
 /arch/*.log
 /arch/tmp/
+/.work.*/

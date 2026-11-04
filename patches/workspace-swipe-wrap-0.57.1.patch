@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Wed, 4 Nov 2026 09:29:45 -0600
+Subject: [PATCH] gestures: add workspace_swipe_wrap
+
+Swiping past the last workspace on a monitor wraps around to the first,
+and back from the first lands on the last, following the same m+1/m-1
+neighbours that workspace dispatchers already wrap around.
+---
+ hyprtester/src/tests/main/gestures.cpp        | 36 +++++++++++++++++++
+ src/config/values/ConfigValues.cpp            |  1 +
+ .../input/UnifiedWorkspaceSwipeGesture.cpp    | 12 ++++---
+ 3 files changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/hyprtester/src/tests/main/gestures.cpp b/hyprtester/src/tests/main/gestures.cpp
+index 3f4b3e083..693922f83 100644
+--- a/hyprtester/src/tests/main/gestures.cpp
++++ b/hyprtester/src/tests/main/gestures.cpp
+@@ -389,3 +389,39 @@ TEST_CASE(gestures) {
+         OK(getFromSocket(std::format("/dispatch hl.dsp.cursor.move({{ x = {}, y = {} }})", x.value(), y.value())));
+     }
+ }
++
++TEST_CASE(workspaceSwipeWrap) {
++    OK(getFromSocket("/eval hl.monitor({ output = 'HEADLESS-WRAP', mode = '1920x1080@60', position = 'auto-right', scale = '1' })"));
++    OK(getFromSocket("/output create headless HEADLESS-WRAP"));
++    ASSERT_CONTAINS(getFromSocket("/monitors"), "HEADLESS-WRAP");
++    OK(getFromSocket("/dispatch hl.dsp.focus({ monitor = 'HEADLESS-WRAP' })"));
++    for (const auto& ws : {"11", "12", "13"}) {
++        OK(getFromSocket(std::format("/eval hl.workspace_rule({{ workspace = '{}', monitor = 'HEADLESS-WRAP', persistent = true }})", ws)));
++    }
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '13' })"));
++    EXPECT_COUNT_STRING(getFromSocket("/workspaces"), "on monitor HEADLESS-WRAP", 3);
++
++    OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_invert = 0, workspace_swipe_create_new = 0 } })"));
++    OK(getFromSocket("/eval hl.plugin.test.alt(1)"));
++
++    // Without wrap, the swipe stops at the last workspace.
++    OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 13 (13)");
++
++    OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_wrap = 1 } })"));
++
++    OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 11 (11)");
++
++    OK(getFromSocket("/eval hl.plugin.test.gesture('left', 3)"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 13 (13)");
++
++    // Wrapping wins over creating a new workspace past the last one.
++    OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_create_new = 1 } })"));
++    OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 11 (11)");
++
++    OK(getFromSocket("/eval hl.plugin.test.alt(0)"));
++    OK(getFromSocket("/output remove HEADLESS-WRAP"));
++    OK(getFromSocket("/reload"));
++}
+diff --git a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+index b2a5f430b..67af569c5 100644
+--- a/src/config/values/ConfigValues.cpp
++++ b/src/config/values/ConfigValues.cpp
+@@ -495,6 +495,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
+         MS<Int>("gestures:workspace_swipe_direction_lock_threshold", "in px, the distance to swipe before direction lock activates.", 10, {.min = 0, .max = 200}),
+         MS<Bool>("gestures:workspace_swipe_forever", "if enabled, swiping will not clamp at the neighboring workspaces but continue to the further ones.", false),
+         MS<Bool>("gestures:workspace_swipe_use_r", "if enabled, swiping will use the r prefix instead of the m prefix for finding workspaces.", false),
++        MS<Bool>("gestures:workspace_swipe_wrap", "if enabled, swiping past the last workspace on a monitor wraps around to the first, and vice versa.", false),
+         MS<Int>("gestures:close_max_timeout", "Timeout for closing windows with the close gesture, in ms.", 1000, {.min = 10, .max = 2000}),
+         MS<Bool>("gestures:scrolling:move_snap_to_grid", "When releasing the scroll move gesture, whether it shoud try to snap to the grid.", true),
+         MS<Bool>("gestures:scrolling:move_snap_cursor", "When releasing the scroll move gesture, whether it shoud snap the cursor to the newly focused window.", true),
+diff --git a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+index b1960c88d..2204bd12c 100644
+--- a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
++++ b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+@@ -225,6 +225,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     static auto  PSWIPEDIRLOCKTHRESHOLD = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_direction_lock_threshold");
+     static auto  PSWIPEFOREVER          = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_forever");
+     static auto  PSWIPEUSER             = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_use_r");
++    static auto  PSWIPEWRAP             = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_wrap");
+     static auto  PWORKSPACEGAP          = CConfigValue<Config::INTEGER>("general:gaps_workspaces");
+ 
+     const auto   SWIPEDISTANCE = std::clamp(*PSWIPEDIST, sc<int64_t>(1LL), sc<int64_t>(UINT32_MAX));
+@@ -254,8 +255,8 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     const auto LEFT_ID  = std::get_if<Workspace::SWorkspaceNumberedID>(&*workspaceLeft.id);
+     const auto RIGHT_ID = std::get_if<Workspace::SWorkspaceNumberedID>(&*workspaceRight.id);
+     if ((sameWorkspaceIdentity(workspaceLeft, m_workspaceBegin) && *PSWIPENEW && (m_delta < 0)) ||
+-        (m_delta > 0 && m_workspaceBegin->getWindowCount() == 0 && BEGIN_ID && RIGHT_ID && RIGHT_ID->value <= *BEGIN_ID) ||
+-        (m_delta < 0 && BEGIN_ID && LEFT_ID && *BEGIN_ID <= LEFT_ID->value)) {
++        (!*PSWIPEWRAP && m_delta > 0 && m_workspaceBegin->getWindowCount() == 0 && BEGIN_ID && RIGHT_ID && RIGHT_ID->value <= *BEGIN_ID) ||
++        (!*PSWIPEWRAP && m_delta < 0 && BEGIN_ID && LEFT_ID && *BEGIN_ID <= LEFT_ID->value)) {
+ 
+         m_delta = 0;
+         releaseOtherParticipants(nullptr);
+@@ -276,7 +277,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     if (m_delta < 0) {
+         const auto PWORKSPACE = State::Workspace::state()->find(workspaceLeft);
+ 
+-        if ((BEGIN_ID && LEFT_ID && LEFT_ID->value > *BEGIN_ID) || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && BEGIN_ID && LEFT_ID && LEFT_ID->value > *BEGIN_ID) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -306,7 +307,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     } else {
+         const auto PWORKSPACE = State::Workspace::state()->find(workspaceRight);
+ 
+-        if ((BEGIN_ID && RIGHT_ID && RIGHT_ID->value < *BEGIN_ID) || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && BEGIN_ID && RIGHT_ID && RIGHT_ID->value < *BEGIN_ID) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -373,6 +374,7 @@ bool CUnifiedWorkspaceSwipeGesture::endSegment() {
+     static auto PSWIPEFORC    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_min_speed_to_force");
+     static auto PSWIPENEW     = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_create_new");
+     static auto PSWIPEUSER    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_use_r");
++    static auto PSWIPEWRAP    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_wrap");
+     static auto PWORKSPACEGAP = CConfigValue<Config::INTEGER>("general:gaps_workspaces");
+     const auto  ANIMSTYLE     = m_workspaceBegin->m_renderOffset->getStyle();
+     const bool  VERTANIMS     = ANIMSTYLE == "slidevert" || ANIMSTYLE.starts_with("slidefadevert");
+@@ -386,7 +388,7 @@ bool CUnifiedWorkspaceSwipeGesture::endSegment() {
+     // no workspace there yet, and we need to choose an ID for a new one now.
+     const auto BEGIN_ID = m_workspaceBegin->numberedID();
+     const auto RIGHT_ID = workspaceRight.id ? std::get_if<Workspace::SWorkspaceNumberedID>(&*workspaceRight.id) : nullptr;
+-    if (BEGIN_ID && RIGHT_ID && RIGHT_ID->value <= *BEGIN_ID && *PSWIPENEW)
++    if (BEGIN_ID && RIGHT_ID && RIGHT_ID->value <= *BEGIN_ID && *PSWIPENEW && !*PSWIPEWRAP)
+         workspaceRight = State::Workspace::resolver()->getWorkspaceTargetFromString("r+1", m_monitor.lock());
+ 
+     if (!workspaceLeft.valid() || !workspaceRight.valid()) {
+-- 
+2.56.0
+
