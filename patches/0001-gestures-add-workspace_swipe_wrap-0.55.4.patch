@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Wed, 4 Nov 2026 09:29:45 -0600
+Subject: [PATCH] gestures: add workspace_swipe_wrap
+
+Swiping past the last workspace on a monitor wraps around to the first,
+and back from the first lands on the last, following the same m+1/m-1
+neighbours that workspace dispatchers already wrap around.
+---
+ src/config/values/ConfigValues.cpp                  |  1 +
+ src/managers/input/UnifiedWorkspaceSwipeGesture.cpp | 11 +++++++----
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+index 23cad96e4..aa1a7f881 100644
+--- a/src/config/values/ConfigValues.cpp
++++ b/src/config/values/ConfigValues.cpp
+@@ -385,6 +385,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
+         MS<Int>("gestures:workspace_swipe_direction_lock_threshold", "in px, the distance to swipe before direction lock activates.", 10, {.min = 0, .max = 200}),
+         MS<Bool>("gestures:workspace_swipe_forever", "if enabled, swiping will not clamp at the neighboring workspaces but continue to the further ones.", false),
+         MS<Bool>("gestures:workspace_swipe_use_r", "if enabled, swiping will use the r prefix instead of the m prefix for finding workspaces.", false),
++        MS<Bool>("gestures:workspace_swipe_wrap", "if enabled, swiping past the last workspace on a monitor wraps around to the first, and vice versa.", false),
+         MS<Int>("gestures:close_max_timeout", "Timeout for closing windows with the close gesture, in ms.", 1000, {.min = 10, .max = 2000}),
+         MS<Bool>("gestures:scrolling:move_snap_to_grid", "When releasing the scroll move gesture, whether it shoud try to snap to the grid.", true),
+         MS<Bool>("gestures:scrolling:move_snap_cursor", "When releasing the scroll move gesture, whether it shoud snap the cursor to the newly focused window.", true),
+diff --git a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+index e2eac6938..1aa01493e 100644
+--- a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
++++ b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+@@ -40,6 +40,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     static auto  PSWIPEDIRLOCKTHRESHOLD = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_direction_lock_threshold");
+     static auto  PSWIPEFOREVER          = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_forever");
+     static auto  PSWIPEUSER             = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_use_r");
++    static auto  PSWIPEWRAP             = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_wrap");
+     static auto  PWORKSPACEGAP          = CConfigValue<Config::INTEGER>("general:gaps_workspaces");
+ 
+     const auto   SWIPEDISTANCE = std::clamp(*PSWIPEDIST, sc<int64_t>(1LL), sc<int64_t>(UINT32_MAX));
+@@ -66,7 +67,8 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     m_delta = std::clamp(m_delta, sc<double>(-SWIPEDISTANCE), sc<double>(SWIPEDISTANCE));
+ 
+     if ((m_workspaceBegin->m_id == workspaceIDLeft && *PSWIPENEW && (m_delta < 0)) ||
+-        (m_delta > 0 && m_workspaceBegin->getWindows() == 0 && workspaceIDRight <= m_workspaceBegin->m_id) || (m_delta < 0 && m_workspaceBegin->m_id <= workspaceIDLeft)) {
++        (!*PSWIPEWRAP &&
++         ((m_delta > 0 && m_workspaceBegin->getWindows() == 0 && workspaceIDRight <= m_workspaceBegin->m_id) || (m_delta < 0 && m_workspaceBegin->m_id <= workspaceIDLeft)))) {
+ 
+         m_delta = 0;
+         g_pHyprRenderer->damageMonitor(m_monitor.lock());
+@@ -84,7 +86,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     if (m_delta < 0) {
+         const auto PWORKSPACE = g_pCompositor->getWorkspaceByID(workspaceIDLeft);
+ 
+-        if (workspaceIDLeft > m_workspaceBegin->m_id || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && workspaceIDLeft > m_workspaceBegin->m_id) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -124,7 +126,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     } else {
+         const auto PWORKSPACE = g_pCompositor->getWorkspaceByID(workspaceIDRight);
+ 
+-        if (workspaceIDRight < m_workspaceBegin->m_id || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && workspaceIDRight < m_workspaceBegin->m_id) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -184,6 +186,7 @@ void CUnifiedWorkspaceSwipeGesture::end() {
+     static auto PSWIPEFORC    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_min_speed_to_force");
+     static auto PSWIPENEW     = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_create_new");
+     static auto PSWIPEUSER    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_use_r");
++    static auto PSWIPEWRAP    = CConfigValue<Config::INTEGER>("gestures:workspace_swipe_wrap");
+     static auto PWORKSPACEGAP = CConfigValue<Config::INTEGER>("general:gaps_workspaces");
+     const auto  ANIMSTYLE     = m_workspaceBegin->m_renderOffset->getStyle();
+     const bool  VERTANIMS     = ANIMSTYLE == "slidevert" || ANIMSTYLE.starts_with("slidefadevert");
+@@ -195,7 +198,7 @@ void CUnifiedWorkspaceSwipeGesture::end() {
+ 
+     // If we've been swiping off the right end with PSWIPENEW enabled, there is
+     // no workspace there yet, and we need to choose an ID for a new one now.
+-    if (workspaceIDRight <= m_workspaceBegin->m_id && *PSWIPENEW)
++    if (workspaceIDRight <= m_workspaceBegin->m_id && *PSWIPENEW && !*PSWIPEWRAP)
+         workspaceIDRight = getWorkspaceIDNameFromString("r+1").id;
+ 
+     auto         PWORKSPACER = g_pCompositor->getWorkspaceByID(workspaceIDRight); // not guaranteed if PSWIPENEW || PSWIPENUMBER
+-- 
+2.56.0
+

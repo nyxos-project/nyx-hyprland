@@ -1,0 +1,6 @@
+/arch/src/
+/arch/pkg/
+/arch/*.tar.gz
+/arch/*.pkg.tar.*
+/arch/*.log
+/arch/tmp/
