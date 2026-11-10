@@ -4,12 +4,12 @@
 
 CXXFLAGS ?= -O2
 PKGS = hyprland pixman-1 libdrm libinput libudev wayland-server xkbcommon cairo pangocairo
-SRC = main.cpp HeaderBar.cpp
+SRC = main.cpp HeaderBar.cpp CornerButton.cpp
 PREFIX ?= /usr/local
 
 all: nyx-decor.so
 
-nyx-decor.so: $(SRC) globals.hpp HeaderBar.hpp
+nyx-decor.so: $(SRC) globals.hpp HeaderBar.hpp CornerButton.hpp
 	$(CXX) -shared -fPIC --no-gnu-unique -std=c++2c $(CXXFLAGS) $(SRC) -o $@ `pkg-config --cflags $(PKGS)` $(EXTRA_CFLAGS)
 
 install: nyx-decor.so

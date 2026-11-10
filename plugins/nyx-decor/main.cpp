@@ -5,15 +5,20 @@
 // nyx-shellctl window-controls --apply) get a Nyx headerbar: the title, then maximize
 // (expand when tiled), float or tile, and close. Dialogs and transient windows get
 // none. Empty space drags a floating window, a double-click maximizes, and a
-// right-click posts nyxdecor>>menu,ADDRESS,X,Y for Nyx Shell's window menu.
+// right-click opens Nyx Shell's window menu (custom>>nyx-window-menu,ADDRESS,X,Y).
+//
+// Windows tagged nyx-controls-chromeless-floating (terminals) get no bar: while they
+// float, a small button in a corner opens the same menu.
 //
 // It also remembers where each window floated: tiling a window and floating it again
 // puts it back there (Hyprland keeps only the size), kept inside its monitor's work
 // area. That holds however the mode changes (a key, a Nyx control, a dispatcher).
 
+#include "CornerButton.hpp"
 #include "HeaderBar.hpp"
 
 #include <hyprland/src/desktop/state/ViewState.hpp>
+#include <hyprland/src/ipc/s2/S2.hpp>
 #include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/event/EventBus.hpp>
@@ -45,12 +50,35 @@ namespace {
             pending.pop_front();
     }
 
-    SP<CNyxHeaderBar> barOf(const PHLWINDOW& w) {
-        for (const auto& b : Nyx::bars) {
-            if (const auto BAR = b.lock(); BAR && BAR->window() == w)
-                return BAR;
+    template <typename T>
+    SP<T> decoOf(const std::vector<WP<T>>& list, const PHLWINDOW& w) {
+        for (const auto& d : list) {
+            if (const auto DECO = d.lock(); DECO && DECO->window() == w)
+                return DECO;
         }
         return nullptr;
+    }
+
+    SP<CNyxHeaderBar> barOf(const PHLWINDOW& w) {
+        return decoOf(Nyx::bars, w);
+    }
+
+    SP<CNyxCornerButton> buttonOf(const PHLWINDOW& w) {
+        return decoOf(Nyx::buttons, w);
+    }
+
+    // Add or remove one decoration of `w` as `want` says.
+    template <typename T>
+    void keep(std::vector<WP<T>>& list, const PHLWINDOW& w, bool want) {
+        const auto HAS = decoOf(list, w);
+        if (want && !HAS) {
+            auto                      deco = makeShared<T>(w);
+            SP<IHyprWindowDecoration> base = deco;
+            if (HyprlandAPI::addWindowDecoration(Nyx::handle, w, std::move(base)))
+                list.emplace_back(deco);
+        } else if (!want && HAS)
+            HyprlandAPI::removeWindowDecoration(Nyx::handle, HAS.get());
+        std::erase_if(list, [](const auto& d) { return d.expired(); });
     }
 
     // Dialogs, transient and override-redirect windows keep their own look.
@@ -61,20 +89,15 @@ namespace {
         return !w->backend().parent() && !TRAITS.transient && !TRAITS.modal && !TRAITS.overrideRedirect;
     }
 
-    // Give `w` a headerbar, or take it away, as its tags and the settings say.
+    // Give `w` a headerbar or the chromeless control, or take it away, as its tags and
+    // the settings say. The control stays on the window and shows only while it floats.
     void sync(const PHLWINDOW& w) {
         if (!w)
             return;
-        const bool WANT = Nyx::settings.enabled->value() && decoratable(w) && w->m_ruleApplicator->m_tagKeeper.isTagged(Nyx::HEADERBAR_TAG);
-        const auto HAS  = barOf(w);
-        if (WANT && !HAS) {
-            auto                      bar = makeShared<CNyxHeaderBar>(w);
-            SP<IHyprWindowDecoration> deco = bar;
-            if (HyprlandAPI::addWindowDecoration(Nyx::handle, w, std::move(deco)))
-                Nyx::bars.emplace_back(bar);
-        } else if (!WANT && HAS)
-            HyprlandAPI::removeWindowDecoration(Nyx::handle, HAS.get());
-        std::erase_if(Nyx::bars, [](const auto& b) { return b.expired(); });
+        const bool OK   = Nyx::settings.enabled->value() && decoratable(w);
+        const auto& TAGS = w->m_ruleApplicator->m_tagKeeper;
+        keep(Nyx::bars, w, OK && TAGS.isTagged(Nyx::HEADERBAR_TAG));
+        keep(Nyx::buttons, w, OK && !TAGS.isTagged(Nyx::HEADERBAR_TAG) && TAGS.isTagged(Nyx::CHROMELESS_TAG));
     }
 
     void syncAll() {
@@ -86,13 +109,20 @@ namespace {
                 BAR->damageEntire();
             }
         }
+        for (const auto& b : Nyx::buttons) {
+            if (const auto BUTTON = b.lock())
+                BUTTON->damageEntire();
+        }
     }
 
+    // The window's mode changed: the bar's room and the control's visibility follow.
     void repositionBar(const PHLWINDOW& w) {
         if (const auto BAR = barOf(w)) {
             g_pDecorationPositioner->repositionDeco(BAR.get());
             BAR->damageEntire();
         }
+        if (const auto BUTTON = buttonOf(w))
+            BUTTON->damageEntire();
     }
 
     // ---------- Floating geometry ----------
@@ -183,6 +213,10 @@ namespace {
         s.fontFamily = add(makeShared<CStringValue>("plugin:nyx_decor:font_family", "Title font (empty: sans-serif)", ""));
         s.doubleClickMaximize  = add(makeShared<CBoolValue>("plugin:nyx_decor:double_click_maximize", "Double-click a headerbar to maximize", true));
         s.restoreFloatGeometry = add(makeShared<CBoolValue>("plugin:nyx_decor:restore_float_geometry", "Float a window where it floated before", true));
+        s.cornerButton = add(makeShared<CBoolValue>("plugin:nyx_decor:corner_button", "The window control on floating chromeless windows", true));
+        s.corner       = add(makeShared<CIntValue>("plugin:nyx_decor:corner_button_corner", "Where the control sits", 0,
+                                                   SIntValueOptions{.min = 0, .max = 3, .map = std::unordered_map<std::string, Config::INTEGER>{
+                                                                                                {"top-right", 0}, {"top-left", 1}, {"bottom-right", 2}, {"bottom-left", 3}}}));
         s.bg           = add(makeShared<CColorValue>("plugin:nyx_decor:col.bg", "Headerbar of the focused window", 0xff181825));
         s.bgInactive   = add(makeShared<CColorValue>("plugin:nyx_decor:col.bg_inactive", "Headerbar of other windows", 0xff1e1e2e));
         s.text         = add(makeShared<CColorValue>("plugin:nyx_decor:col.text", "Title and buttons", 0xffcdd6f4));
@@ -199,6 +233,12 @@ void Nyx::dispatch(const std::string& lua) {
 
 std::string Nyx::selector(const PHLWINDOW& w) {
     return std::format("address:0x{:x}", rc<uintptr_t>(w.get()));
+}
+
+void Nyx::openMenu(const PHLWINDOW& w, const Vector2D& at) {
+    if (!w || !IPC::Socket2::sock())
+        return;
+    IPC::Socket2::sock()->postEvent({.event = "custom", .data = std::format("nyx-window-menu,0x{:x},{},{}", rc<uintptr_t>(w.get()), sc<int>(at.x), sc<int>(at.y))});
 }
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -233,6 +273,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             if (const auto BAR = b.lock())
                 BAR->pointerAt(pos);
         }
+        for (const auto& b : Nyx::buttons) {
+            if (const auto BUTTON = b.lock())
+                BUTTON->pointerAt(pos);
+        }
     }));
     listeners.emplace_back(ev.render.pre.listen([](PHLMONITOR monitor) { remember(monitor); }));
     listeners.emplace_back(ev.config.reloaded.listen([] { later(syncAll); }));
@@ -252,6 +296,11 @@ APICALL EXPORT void PLUGIN_EXIT() {
         if (const auto BAR = b.lock())
             HyprlandAPI::removeWindowDecoration(Nyx::handle, BAR.get());
     }
+    for (const auto& b : Nyx::buttons) {
+        if (const auto BUTTON = b.lock())
+            HyprlandAPI::removeWindowDecoration(Nyx::handle, BUTTON.get());
+    }
     Nyx::bars.clear();
+    Nyx::buttons.clear();
     floats.clear();
 }

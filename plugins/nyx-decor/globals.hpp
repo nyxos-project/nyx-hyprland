@@ -14,13 +14,15 @@
 #include <vector>
 
 class CNyxHeaderBar;
+class CNyxCornerButton;
 
 namespace Nyx {
     inline HANDLE handle = nullptr;
 
-    // The tag window rules put on windows that get a headerbar (nyx-shellctl
-    // window-controls --apply writes them from [window_controls] in shell.toml).
+    // The tags window rules put on windows (nyx-shellctl window-controls --apply writes
+    // them from [window_controls] in shell.toml): a headerbar, or the chromeless control.
     inline const std::string HEADERBAR_TAG = "nyx-controls-custom-headerbar";
+    inline const std::string CHROMELESS_TAG = "nyx-controls-chromeless-floating";
 
     // plugin:nyx_decor:* (Lua: hl.config({ plugin = { nyx_decor = { … } } })).
     struct SSettings {
@@ -30,16 +32,25 @@ namespace Nyx {
         SP<Config::Values::CStringValue> fontFamily;
         SP<Config::Values::CBoolValue>   doubleClickMaximize;
         SP<Config::Values::CBoolValue>   restoreFloatGeometry;
+        // The chromeless control, and its corner: top-right, top-left, bottom-right,
+        // bottom-left.
+        SP<Config::Values::CBoolValue> cornerButton;
+        SP<Config::Values::CIntValue>  corner;
         // Nyx Theme Engine's colours (nyx-themed writes them with the theme).
         SP<Config::Values::CColorValue> bg, bgInactive, text, textInactive, hover, closeHover, closeHoverText;
     };
     inline SSettings settings;
 
-    inline std::vector<WP<CNyxHeaderBar>> bars;
+    inline std::vector<WP<CNyxHeaderBar>>    bars;
+    inline std::vector<WP<CNyxCornerButton>> buttons;
 
     // Run a dispatcher the way Shell Core and the Nyx apps do, so every presentation
     // of a window action is the same action.
     void dispatch(const std::string& lua);
+
+    // Ask Nyx Shell for `w`'s window menu at `at` (global logical coordinates): Hyprland's
+    // custom event `custom>>nyx-window-menu,0xADDRESS,X,Y`, as hl.dsp.event posts it.
+    void openMenu(const PHLWINDOW& w, const Vector2D& at);
 
     // `address:0x…` for a dispatcher's window argument.
     std::string selector(const PHLWINDOW& w);

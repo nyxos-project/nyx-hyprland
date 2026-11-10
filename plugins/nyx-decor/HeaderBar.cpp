@@ -4,7 +4,6 @@
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
-#include <hyprland/src/ipc/s2/S2.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/output/Monitor.hpp>
@@ -334,7 +333,7 @@ bool CNyxHeaderBar::onButton(const Vector2D& coords, const IPointer::SButtonEven
 
     if (e.button == RIGHT_BUTTON) {
         if (PRESSED)
-            IPC::Socket2::sock()->postEvent({.event = "nyxdecor", .data = std::format("menu,{},{},{}", Nyx::selector(W).substr(8), sc<int>(coords.x), sc<int>(coords.y))});
+            Nyx::openMenu(W, coords);
         return true;
     }
     if (e.button != LEFT_BUTTON)
