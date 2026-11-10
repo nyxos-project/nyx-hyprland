@@ -17,7 +17,11 @@ a hidden workspace is not a security boundary.
 
 **Risk:** medium. Focus code changes upstream often.
 
-**Recommendation:** priority 2, once the agent workspace design exists.
+**Recommendation:** not needed for now. Agent workspaces were built outside the
+compositor: each is a headless sway run by `nyx-agentd`, with its own input and
+capture, so the agent never touches this Hyprland (see `nyx-agents/docs/WORKSPACES.md`).
+A compositor-native backend could still sit behind `nyx-agentd`'s `WorkspaceBackend`
+later, if showing agent windows on the desktop becomes a goal.
 
 ## Persistent workspace layouts
 
