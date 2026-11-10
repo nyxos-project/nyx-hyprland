@@ -4,8 +4,11 @@ One physical output split into one to three monitors side by side. Each region i
 real Hyprland monitor with its own `wl_output`, workspaces, layout, fullscreen, layer
 surfaces and screencopy target.
 
-The feature is off by default and still experimental. It has been exercised only in a
-headless test compositor, never on real hardware, so see "Status" before relying on it.
+The feature is off by default and still experimental. It has run in a headless test
+compositor and, on 2026-11-10, on the NyxOS VM's virtio-gpu output (1280×800 split in
+two): regions, their own bars and docks, windows, `v~N`, merge and restore, physical
+fullscreen and `disable_all` all worked there after patch 0010. It has not run on a real
+ultrawide yet; see "Known limitations".
 
 ## Using it
 
@@ -147,6 +150,7 @@ Branch `nyx/0.57.2` in `~/Projects/Hyprland`, exported to `patches/0.57.2/` (`pa
 | 0007 ipc: expose virtual monitors | `Commands.cpp`, `LuaMonitor.cpp` |
 | 0008 hyprtester: add virtual monitor tests | new `virtual_monitors.cpp` |
 | 0009 virtual monitors: workspaces = 0, merge remembers each workspace's region | `VirtualMonitorManager.*` only |
+| 0010 virtual monitors: fixes from the first run on a NyxOS VM (host found by name, workspaces restored to their own region, monitor-less persistent workspaces left in place, focus restored, rules removed) | `VirtualMonitorManager.*`, `LuaBindingsDispatchers.cpp`, `WorkspaceRuleManager.{hpp,cpp}` |
 
 **Upstream changes:** about 400 lines across 22 files, all small hooks; the rest is in
 new files. With the feature off, every hook takes the upstream path: the checks are on

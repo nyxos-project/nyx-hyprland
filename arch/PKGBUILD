@@ -80,8 +80,10 @@ source=("$_archive.tar.gz::$url/releases/download/v$pkgver/source-v$pkgver.tar.g
         0006-virtual-monitors-add-merge-restore-physical-fullscre.patch
         0007-ipc-expose-virtual-monitors.patch
         0008-hyprtester-add-virtual-monitor-tests.patch
-        0009-virtual-monitors-workspaces-0-leaves-numbering-to-th.patch)
+        0009-virtual-monitors-workspaces-0-leaves-numbering-to-th.patch
+        0010-virtual-monitors-fixes-from-the-first-run-on-a-NyxOS.patch)
 sha256sums=('34dbec0738ab88c8228caf89385662688ab1601ea58fbe5c60a6b6ab383db46d'
+            SKIP
             SKIP
             SKIP
             SKIP
@@ -104,6 +106,7 @@ prepare() {
 	patch -Np1 -i "$srcdir/0007-ipc-expose-virtual-monitors.patch"
 	patch -Np1 -i "$srcdir/0008-hyprtester-add-virtual-monitor-tests.patch"
 	patch -Np1 -i "$srcdir/0009-virtual-monitors-workspaces-0-leaves-numbering-to-th.patch"
+	patch -Np1 -i "$srcdir/0010-virtual-monitors-fixes-from-the-first-run-on-a-NyxOS.patch"
 	sed -i -e '/^release:/{n;s/-D/-DCMAKE_SKIP_RPATH=ON -D/}' Makefile
 	sed -i -e '/find_package.glaze/s/7...<8 //' {.,hyprpm,start}/CMakeLists.txt
 }
