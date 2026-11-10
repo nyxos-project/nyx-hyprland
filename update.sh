@@ -1,53 +1,96 @@
 #!/usr/bin/env bash
 # Rebuilds hyprland-nyx for a Hyprland release: Arch Linux's hyprland PKGBUILD for
-# that release, with the Nyx patch on top.
+# that release, with the Nyx patch series on top.
 #
 # Usage: ./update.sh [--force] [--no-build] [version]
+#        ./update.sh --export <branch> [version]
 #   version    an Arch package version (0.57.1-1) or a Hyprland version (0.57.1);
 #              default: the hyprland version in the pacman sync database
 #   --force    rebuild even if the PKGBUILD is already at that version
-#   --no-build only regenerate the PKGBUILD (and the patch, if it needed rebasing)
+#   --no-build only regenerate the PKGBUILD (and the series, if it needed rebasing)
+#   --export   write patches/<version>/ from the commits on <branch> after the
+#              v<version> tag in the Hyprland checkout, then stop
 #
-# patches/ keeps one patch per Hyprland version it was made for; the newest one that
-# applies cleanly is used. If none does, the newest is rebased onto the new release
-# in the Hyprland checkout ($HYPRLAND_SRC, default ~/Projects/Hyprland) with git's
-# 3-way merge and saved as patches/workspace-swipe-wrap-<version>.patch. If that
-# conflicts too, nothing is changed and the script stops.
+# patches/<version>/ keeps one numbered series (0001-*.patch, 0002-*.patch, ...) per
+# Hyprland version it was made for; the newest series that applies cleanly is used.
+# If none does, the newest is rebased onto the new release in the Hyprland checkout
+# ($HYPRLAND_SRC, default ~/Projects/Hyprland) with git's 3-way merge and saved as
+# patches/<version>/. If that conflicts too, nothing is changed and the script stops.
+#
+# When Arch has no hyprland package for the version yet, its newest PKGBUILD is
+# used with the version and source checksum replaced.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 arch="$here/arch"
-patch_name=0001-gestures-add-workspace_swipe_wrap.patch
 hyprland_src=${HYPRLAND_SRC:-$HOME/Projects/Hyprland}
 arch_repo=https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland
 arch_api=https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Fhyprland
 
-force=0 build=1 want=
-for arg in "$@"; do
-	case $arg in
+force=0 build=1 want= export_branch=
+while [ $# -gt 0 ]; do
+	case $1 in
 	--force) force=1 ;;
 	--no-build) build=0 ;;
-	-h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	-*) echo "unknown option: $arg" >&2; exit 2 ;;
-	*) want=$arg ;;
+	--export)
+		[ $# -ge 2 ] || { echo "--export needs a branch" >&2; exit 2; }
+		export_branch=$2
+		shift
+		;;
+	-h | --help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-*) echo "unknown option: $1" >&2; exit 2 ;;
+	*) want=$1 ;;
 	esac
+	shift
 done
 
 die() { echo "error: $*" >&2; exit 1; }
 
-# The Arch packaging tag to build from (0.57.1-1).
+# Writes the commits after v$1 on $2 to patches/$1/ as a numbered series.
+export_series() {
+	local ver=$1 branch=$2 dir="$here/patches/$1" tmp
+	[ -d "$hyprland_src/.git" ] || die "no Hyprland checkout at $hyprland_src"
+	git -C "$hyprland_src" rev-parse -q --verify "v$ver^{commit}" >/dev/null ||
+		git -C "$hyprland_src" fetch -q origin tag "v$ver" --no-tags || die "couldn't fetch the v$ver tag"
+	[ "$(git -C "$hyprland_src" rev-list --count "v$ver..$branch")" -gt 0 ] || die "$branch has no commits after v$ver"
+	tmp=$(mktemp -d)
+	git -C "$hyprland_src" format-patch -q --zero-commit -N -o "$tmp" "v$ver..$branch"
+	rm -rf "$dir"
+	mkdir -p "$dir"
+	mv "$tmp"/*.patch "$dir/"
+	rmdir "$tmp"
+	echo "==> Wrote $(ls "$dir" | wc -l) patches from $branch to patches/$ver/"
+}
+
+if [ -n "$export_branch" ]; then
+	[ -n "$want" ] || die "--export needs a version"
+	export_series "${want%-*}" "$export_branch"
+	exit 0
+fi
+
+# The Arch packaging tag to build from (0.57.1-1), and whether it's for another
+# version (Arch hasn't packaged $ver yet).
+arch_tags() {
+	curl -sfL "$arch_api/repository/tags?search=$1&per_page=100" |
+		python3 -c 'import json, sys; t = [x["name"] for x in json.load(sys.stdin)]; t.sort(key=lambda n: [int(p) for p in n.replace("-", ".").split(".") if p.isdigit()]); print(t[-1] if t else "")'
+}
 if [ -z "$want" ]; then
 	tag=$(pacman -Si hyprland 2>/dev/null | awk '/^Version/ { print $3; exit }')
 	[ -n "$tag" ] || die "pacman has no hyprland package in its sync database"
 	tag=${tag#*:}
+	ver=${tag%-*}
 elif [[ $want == *-* ]]; then
 	tag=$want
+	ver=${tag%-*}
 else
-	tag=$(curl -sfL "$arch_api/repository/tags?search=%5E$want-&per_page=100" |
-		python3 -c 'import json, sys; t = [x["name"] for x in json.load(sys.stdin)]; t.sort(key=lambda n: int(n.rsplit("-", 1)[1])); print(t[-1] if t else "")')
-	[ -n "$tag" ] || die "Arch has no hyprland package for $want"
+	ver=$want
+	tag=$(arch_tags "%5E$ver-")
+	if [ -z "$tag" ]; then
+		tag=$(arch_tags "")
+		[ -n "$tag" ] || die "couldn't list Arch's hyprland packages"
+		echo "==> Arch has no hyprland package for $ver yet; adapting its $tag PKGBUILD"
+	fi
 fi
-ver=${tag%-*}
 
 current=$(. "$arch/PKGBUILD" && echo "$pkgver")
 if [ "$ver" = "$current" ] && [ "$force" = 0 ]; then
@@ -77,61 +120,77 @@ tar -xzf "$tarball" -C "$work/src"
 src="$work/src/hyprland-source"
 [ -d "$src" ] || die "the $ver source tarball has no hyprland-source folder"
 
-# Applies with no fuzz: offsets are fine, guessed context is not.
-applies() { patch -d "$src" -Np1 -F0 --dry-run --silent <"$1" >/dev/null 2>&1; }
+# A series applies when every patch applies in order with no fuzz: offsets are
+# fine, guessed context is not.
+applies() {
+	rm -rf "$work/try"
+	cp -a "$src" "$work/try"
+	local p
+	for p in "$1"/*.patch; do
+		patch -d "$work/try" -Np1 -F0 --silent <"$p" >/dev/null 2>&1 || return 1
+	done
+}
 
-mapfile -t patches < <(ls "$here"/patches/workspace-swipe-wrap-*.patch | sort -rV)
-[ "${#patches[@]}" -gt 0 ] || die "no patches in $here/patches"
-patch=
-for p in "${patches[@]}"; do
-	if applies "$p"; then
-		patch=$p
+mapfile -t series < <(find "$here/patches" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -rV)
+[ "${#series[@]}" -gt 0 ] || die "no patch series in $here/patches"
+chosen=
+for s in "${series[@]}"; do
+	if applies "$here/patches/$s"; then
+		chosen=$s
 		break
 	fi
 done
 
-if [ -n "$patch" ]; then
-	echo "==> $(basename "$patch") applies to $ver"
+if [ -n "$chosen" ]; then
+	echo "==> patches/$chosen applies to $ver"
 else
-	newest=${patches[0]}
-	patch="$here/patches/workspace-swipe-wrap-$ver.patch"
-	echo "==> No saved patch applies to $ver as is; rebasing $(basename "$newest") in $hyprland_src"
+	newest=${series[0]}
+	echo "==> No saved series applies to $ver as is; rebasing patches/$newest in $hyprland_src"
 	[ -d "$hyprland_src/.git" ] || die "no Hyprland checkout at $hyprland_src to rebase in"
 	git -C "$hyprland_src" fetch -q origin tag "v$ver" --no-tags || die "couldn't fetch the v$ver tag"
 	git -C "$hyprland_src" worktree add -q --detach "$work/wt" "v$ver"
-	if ! git -C "$work/wt" am -q -3 <"$newest"; then
+	if ! git -C "$work/wt" am -q -3 "$here/patches/$newest"/*.patch; then
 		git -C "$work/wt" am --abort 2>/dev/null || true
-		die "the patch conflicts with $ver; rebase it by hand (git -C $hyprland_src checkout -b workspace-swipe-wrap-$ver v$ver, then git am -3 $newest) and save it as $patch"
+		die "the series conflicts with $ver; rebase it by hand (git -C $hyprland_src checkout -b nyx/$ver v$ver, then git am -3 patches/$newest/*.patch) and run ./update.sh --export nyx/$ver $ver"
 	fi
-	git -C "$work/wt" format-patch -q -1 --zero-commit -N --stdout >"$work/rebased.patch"
-	applies "$work/rebased.patch" || die "the rebased patch still doesn't apply cleanly"
-	cp "$work/rebased.patch" "$patch"
-	echo "==> Rebased the patch onto $ver ($patch)"
+	mkdir "$work/rebased"
+	git -C "$work/wt" format-patch -q --zero-commit -N -o "$work/rebased" "v$ver..HEAD"
+	applies "$work/rebased" || die "the rebased series still doesn't apply cleanly"
+	mkdir -p "$here/patches/$ver"
+	cp "$work/rebased"/*.patch "$here/patches/$ver/"
+	chosen=$ver
+	echo "==> Rebased the series onto $ver (patches/$ver)"
 fi
+
+mapfile -t patch_files < <(cd "$here/patches/$chosen" && ls -- *.patch | sort)
+sha=$(sha256sum "$tarball" | cut -d' ' -f1)
 
 # Arch's split package (hyprland + hyprpm) becomes one hyprland-nyx that replaces
 # hyprland and provides it at the same version.
-TAG=$tag PATCH=$patch_name python3 - "$work/PKGBUILD.arch" "$work/PKGBUILD" <<'EOF'
+TAG=$tag VER=$ver SHA=$sha PATCHES="${patch_files[*]}" python3 - "$work/PKGBUILD.arch" "$work/PKGBUILD" <<'EOF'
 import os, re, sys
 
 text = open(sys.argv[1]).read()
-patch, tag = os.environ["PATCH"], os.environ["TAG"]
+patches, tag, ver, sha = os.environ["PATCHES"].split(), os.environ["TAG"], os.environ["VER"], os.environ["SHA"]
 
 def sub(pattern, repl, flags=re.M):
     global text
-    text, n = re.subn(pattern, repl, text, count=1, flags=flags)
+    text, n = re.subn(pattern, lambda _: repl if isinstance(repl, str) else repl(_), text, count=1, flags=flags)
     if n != 1:
         sys.exit(f"Arch's PKGBUILD for {tag} changed shape (no match for {pattern!r}); update arch/PKGBUILD by hand")
 
 sub(r"^pkgname=\(hyprland hyprpm\)$", "pkgname=hyprland-nyx\n_pkgname=hyprland")
+sub(r"^pkgver=.*$", f"pkgver={ver}")
 sub(r"^pkgrel=.*$", "pkgrel=1")
-sub(r"^(pkgdesc='.*)'$", r"\1 (with Nyx patches)'")
+sub(r"^(pkgdesc='.*)'$", lambda m: m.group(1) + " (with Nyx patches)'")
 sub(r"^url=.*$", "url='https://github.com/hyprwm/Hyprland'")
-sub(r"^provides=\((.*)\)$", r'provides=("$_pkgname=$pkgver" \1)' + '\nconflicts=("$_pkgname")')
+sub(r"^provides=\((.*)\)$", lambda m: f'provides=("$_pkgname=$pkgver" {m.group(1)})\nconflicts=("$_pkgname")')
 sub(r'^_archive=.*$', '_archive="Hyprland-$pkgver"')
-sub(r"^source=\((.*)\)$", r"source=(\1" + f"\n        {patch})")
-sub(r"^sha256sums=\((.*)\)$", r"sha256sums=(\1" + "\n            SKIP)")
-sub(r'(^prepare\(\) \{\n(?:.*\n)*?\tcd "\$_archive"\n)', r"\1" + f'\tpatch -Np1 -i "$srcdir/{patch}"\n')
+pad = "\n        "
+sub(r"^source=\((\S+)\)$", lambda m: "source=(" + m.group(1) + "".join(pad + p for p in patches) + ")")
+sub(r"^sha256sums=\('[0-9a-f]+'\)$", "sha256sums=('" + sha + "'" + "".join("\n            SKIP" for _ in patches) + ")")
+apply = "".join(f'\tpatch -Np1 -i "$srcdir/{p}"\n' for p in patches)
+sub(r'(^prepare\(\) \{\n(?:.*\n)*?\tcd "\$_archive"\n)', lambda m: m.group(1) + apply)
 sub(r"^package_hyprland\(\) \{$", "package() {")
 sub(r"\npackage_hyprpm\(\) \{\n.*?\n\}\n", "\n", re.S)
 text = text.rstrip("\n") + "\n"
@@ -141,9 +200,12 @@ open(sys.argv[2], "w").write(header + text)
 EOF
 bash -n "$work/PKGBUILD"
 cp "$work/PKGBUILD" "$arch/PKGBUILD"
-ln -sf "../patches/$(basename "$patch")" "$arch/$patch_name"
+find "$arch" -maxdepth 1 -name '*.patch' -type l -delete
+for p in "${patch_files[@]}"; do
+	ln -sf "../patches/$chosen/$p" "$arch/$p"
+done
 find "$arch" -maxdepth 1 -name 'Hyprland-*.tar.gz' ! -name "Hyprland-$ver.tar.gz" -delete
-echo "==> Wrote arch/PKGBUILD for $ver"
+echo "==> Wrote arch/PKGBUILD for $ver with ${#patch_files[@]} patches from patches/$chosen"
 
 [ "$build" = 1 ] || exit 0
 

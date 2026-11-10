@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Mon, 9 Nov 2026 23:11:18 -0600
+Subject: [PATCH] hyprtester: add virtual monitor tests
+
+---
+ .../src/tests/main/virtual_monitors.cpp       | 226 ++++++++++++++++++
+ 1 file changed, 226 insertions(+)
+ create mode 100644 hyprtester/src/tests/main/virtual_monitors.cpp
+
+diff --git a/hyprtester/src/tests/main/virtual_monitors.cpp b/hyprtester/src/tests/main/virtual_monitors.cpp
+new file mode 100644
+index 000000000..0993d5a84
+--- /dev/null
++++ b/hyprtester/src/tests/main/virtual_monitors.cpp
+@@ -0,0 +1,226 @@
++#include "tests.hpp"
++#include "../../shared.hpp"
++#include "../../hyprctlCompat.hpp"
++#include "../shared.hpp"
++
++#include <hyprutils/os/Process.hpp>
++#include <hyprutils/utils/ScopeGuard.hpp>
++
++#include <chrono>
++#include <format>
++#include <functional>
++#include <string>
++#include <thread>
++
++using namespace Hyprutils::OS;
++using namespace Hyprutils::Memory;
++using namespace Hyprutils::Utils;
++
++static constexpr const char* HOST = "HEADLESS-VHOST";
++
++static bool                  waitFor(const std::function<bool()>& fn) {
++    for (int i = 0; i < 50; ++i) {
++        if (fn())
++            return true;
++        std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    }
++    return false;
++}
++
++static bool hasMonitor(const std::string& name, bool all = false) {
++    return getFromSocket(all ? "/monitors all" : "/monitors").contains(std::format("Monitor {} (ID ", name));
++}
++
++static std::string monitorBlock(const std::string& name) {
++    const auto ALL   = getFromSocket("/monitors all");
++    const auto START = ALL.find(std::format("Monitor {} (ID ", name));
++    if (START == std::string::npos)
++        return "";
++    const auto END = ALL.find("\nMonitor ", START + 1);
++    return ALL.substr(START, END == std::string::npos ? std::string::npos : END - START);
++}
++
++static std::string region(int n) {
++    return std::format("{}.v{}", HOST, n);
++}
++
++// foot instead of kitty: it's what this machine has, and it only talks to the test compositor
++static CUniquePointer<CProcess> spawnFoot(const std::string& appID) {
++    const auto               BEFORE = Tests::windowCount();
++    CUniquePointer<CProcess> foot   = makeUnique<CProcess>("foot", std::vector<std::string>{"--app-id", appID});
++    foot->addEnv("WAYLAND_DISPLAY", WLDISPLAY);
++    foot->runAsync();
++
++    if (!waitFor([&] { return !Tests::processAlive(foot->pid()) || Tests::windowCount() > BEFORE; }) || !Tests::processAlive(foot->pid()))
++        return nullptr;
++
++    return foot;
++}
++
++static bool setUpHost(const std::string& virtualMonitor) {
++    if (getFromSocket("/eval hl.config({ experimental = { virtual_monitors = true } })") != "ok")
++        return false;
++    if (getFromSocket(std::format("/eval hl.monitor({{ output = '{}', mode = '3840x1080@60', position = '10000x0', scale = '1' }})", HOST)) != "ok")
++        return false;
++    if (!hasMonitor(HOST, true) && getFromSocket(std::format("/output create headless {}", HOST)) != "ok")
++        return false;
++    if (!waitFor([] { return hasMonitor(HOST, true); }))
++        return false;
++    return getFromSocket(std::format("/eval {}", virtualMonitor)) == "ok";
++}
++
++static void tearDownHost() {
++    Tests::killAllWindows();
++    getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', enabled = false }})", HOST));
++    waitFor([] { return !hasMonitor(region(1), true); });
++    getFromSocket(std::format("/output remove {}", HOST));
++    waitFor([] { return !hasMonitor(HOST, true); });
++    getFromSocket("/reload");
++}
++
++TEST_CASE(virtualMonitorsTwoRegions) {
++    CScopeGuard guard = {[] { tearDownHost(); }};
++
++    ASSERT(setUpHost(std::format("hl.virtual_monitor({{ output = '{}', count = 2 }})", HOST)), true);
++    ASSERT(waitFor([] { return hasMonitor(region(1)) && hasMonitor(region(2)); }), true);
++
++    // the regions split the host exactly, and the host itself is no longer an ordinary monitor
++    EXPECT_CONTAINS(monitorBlock(region(1)), "1920x1080@60.00000 at 10000x0");
++    EXPECT_CONTAINS(monitorBlock(region(2)), "1920x1080@60.00000 at 11920x0");
++    EXPECT_CONTAINS(monitorBlock(region(2)), "virtual: region 2 of 2 on HEADLESS-VHOST");
++    EXPECT_CONTAINS(monitorBlock(HOST), "virtual: host of");
++    EXPECT(hasMonitor(HOST), false);
++
++    // each region switches workspaces on its own
++    OK(getFromSocket(std::format("/dispatch hl.dsp.focus({{ monitor = '{}' }})", region(1))));
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = '77' })"));
++    OK(getFromSocket(std::format("/dispatch hl.dsp.focus({{ monitor = '{}' }})", region(2))));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 201 (1) on monitor");
++
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'v~3' })"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 203 (3) on monitor");
++    EXPECT_CONTAINS(monitorBlock(region(1)), "active workspace: 77 (77)");
++
++    // looping stays inside the region
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'v~10' })"));
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'm+1' })"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 201 (1) on monitor");
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'm-1' })"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 210 (10) on monitor");
++    EXPECT_CONTAINS(monitorBlock(region(1)), "active workspace: 77 (77)");
++
++    // windows open on the focused region and fullscreen fills only that region
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'v~2' })"));
++    auto foot = spawnFoot("vm_test_a");
++    ASSERT(!!foot, true);
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "workspace: 202 (2)");
++
++    OK(getFromSocket("/dispatch hl.dsp.window.fullscreen({ mode = 'fullscreen' })"));
++    Tests::sync();
++    EXPECT(Tests::getAttribute(getFromSocket("/activewindow"), "at"), "11920,0");
++    EXPECT(Tests::getAttribute(getFromSocket("/activewindow"), "size"), "1920,1080");
++    EXPECT_CONTAINS(monitorBlock(region(1)), "active workspace: 77 (77)");
++    OK(getFromSocket("/dispatch hl.dsp.window.fullscreen({ mode = 'fullscreen' })"));
++
++    // a window moves to the other region with the ordinary monitor dispatcher
++    OK(getFromSocket(std::format("/dispatch hl.dsp.window.move({{ monitor = '{}' }})", region(1))));
++    Tests::sync();
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "workspace: 77 (77)");
++    OK(getFromSocket(std::format("/dispatch hl.dsp.window.move({{ workspace = '202' }})")));
++    Tests::sync();
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "workspace: 202 (2)");
++
++    // merging keeps the window and gives the host back; restoring puts everything back
++    OK(getFromSocket(std::format("/dispatch hl.dsp.virtual_monitor.merge({{ monitor = '{}' }})", region(2))));
++    ASSERT(waitFor([] { return hasMonitor(HOST) && !hasMonitor(region(2), true); }), true);
++    EXPECT(Tests::windowCount(), 1);
++    EXPECT_CONTAINS(getFromSocket("/virtualmonitors"), "merged");
++
++    OK(getFromSocket(std::format("/dispatch hl.dsp.virtual_monitor.restore({{ monitor = '{}' }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(2)); }), true);
++    EXPECT(Tests::windowCount(), 1);
++    EXPECT_CONTAINS(monitorBlock(region(2)), "active workspace: 202 (2)");
++    EXPECT_CONTAINS(monitorBlock(region(1)), "active workspace: 77 (77)");
++    EXPECT(hasMonitor(HOST), false);
++
++    // turning it off leaves an ordinary monitor with every window on it
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', enabled = false }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(HOST) && !hasMonitor(region(1), true); }), true);
++    EXPECT(Tests::windowCount(), 1);
++    EXPECT_CONTAINS(monitorBlock(HOST), "3840x1080@60.00000 at 10000x0");
++    EXPECT_CONTAINS(monitorBlock(HOST), "virtual: none");
++}
++
++TEST_CASE(virtualMonitorsThreeRegionsAndRatios) {
++    CScopeGuard guard = {[] { tearDownHost(); }};
++
++    ASSERT(setUpHost(std::format("hl.virtual_monitor({{ output = '{}', count = 3, layout = 'center-focused' }})", HOST)), true);
++    ASSERT(waitFor([] { return hasMonitor(region(3)); }), true);
++
++    EXPECT_CONTAINS(monitorBlock(region(1)), "960x1080@60.00000 at 10000x0");
++    EXPECT_CONTAINS(monitorBlock(region(2)), "1920x1080@60.00000 at 10960x0");
++    EXPECT_CONTAINS(monitorBlock(region(3)), "960x1080@60.00000 at 12880x0");
++
++    // custom proportions resize the regions in place
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', regions = {{ 20, 55, 25 }} }})", HOST)));
++    ASSERT(waitFor([] { return monitorBlock(region(2)).contains("2112x1080@60.00000 at 10768x0"); }), true);
++    EXPECT_CONTAINS(monitorBlock(region(1)), "768x1080@60.00000 at 10000x0");
++    EXPECT_CONTAINS(monitorBlock(region(3)), "960x1080@60.00000 at 12880x0");
++
++    // each region loops through its own workspaces
++    OK(getFromSocket(std::format("/dispatch hl.dsp.focus({{ monitor = '{}' }})", region(3))));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 301 (1) on monitor");
++    OK(getFromSocket("/dispatch hl.dsp.focus({ workspace = 'm-1' })"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 310 (10) on monitor");
++    EXPECT_CONTAINS(monitorBlock(region(2)), "active workspace: 201 (1)");
++
++    // going from three regions to two keeps every workspace reachable
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 2 }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(2)) && !hasMonitor(region(3), true); }), true);
++    EXPECT_CONTAINS(monitorBlock(region(2)), "1920x1080@60.00000 at 11920x0");
++}
++
++TEST_CASE(virtualMonitorsRejectsBadLayouts) {
++    CScopeGuard guard = {[] { tearDownHost(); }};
++
++    // a region narrower than the minimum is refused and the output stays whole
++    ASSERT(setUpHost(std::format("hl.virtual_monitor({{ output = '{}', regions = {{ 1, 20 }} }})", HOST)), true);
++    Tests::sync(10);
++    EXPECT(hasMonitor(region(1), true), false);
++    EXPECT(hasMonitor(HOST), true);
++
++    // an unconfirmed layout change reverts on its own
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 2 }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(2)); }), true);
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 3, confirm = 1 }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(3)); }), true);
++    ASSERT(waitFor([] { return !hasMonitor(region(3), true) && hasMonitor(region(2)); }), true);
++
++    // a confirmed one stays
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 3, confirm = 1 }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(3)); }), true);
++    OK(getFromSocket("/dispatch hl.dsp.virtual_monitor.confirm()"));
++    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
++    EXPECT(hasMonitor(region(3)), true);
++
++    // the recovery dispatcher gives every output back
++    OK(getFromSocket("/dispatch hl.dsp.virtual_monitor.disable_all()"));
++    ASSERT(waitFor([] { return hasMonitor(HOST) && !hasMonitor(region(1), true); }), true);
++
++    // region outputs can't be removed behind the manager's back
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 2 }})", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(region(2)); }), true);
++    EXPECT_CONTAINS(getFromSocket(std::format("/output remove {}", region(2))), "virtual monitor");
++}
++
++TEST_CASE(virtualMonitorsDisabledByDefault) {
++    CScopeGuard guard = {[] { tearDownHost(); }};
++
++    OK(getFromSocket(std::format("/eval hl.monitor({{ output = '{}', mode = '3840x1080@60', position = '10000x0', scale = '1' }})", HOST)));
++    OK(getFromSocket(std::format("/output create headless {}", HOST)));
++    ASSERT(waitFor([] { return hasMonitor(HOST); }), true);
++    OK(getFromSocket(std::format("/eval hl.virtual_monitor({{ output = '{}', count = 2 }})", HOST)));
++    Tests::sync(10);
++    EXPECT(hasMonitor(region(1), true), false);
++    EXPECT_CONTAINS(monitorBlock(HOST), "virtual: none");
++}
+-- 
+2.56.0
+

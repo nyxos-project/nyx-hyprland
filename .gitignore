@@ -5,3 +5,4 @@
 /arch/*.log
 /arch/tmp/
 /.work.*/
+/.deps/

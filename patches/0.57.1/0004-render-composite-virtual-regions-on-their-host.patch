@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Mon, 9 Nov 2026 23:11:18 -0600
+Subject: [PATCH] render: composite virtual regions on their host
+
+Regions keep a copy of each frame like a mirrored output does, and damage
+their host at their pixel offset; the host draws the copies side by side.
+---
+ src/output/MonitorResources.cpp        |  2 +-
+ src/output/OutputCommitCoordinator.cpp |  2 +-
+ src/render/Renderer.cpp                | 26 +++++++++++++++++++++++++-
+ src/render/Renderer.hpp                |  1 +
+ src/render/scene/MonitorScene.cpp      |  7 +++++--
+ 5 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/src/output/MonitorResources.cpp b/src/output/MonitorResources.cpp
+index 4cc4d1bb8..ae04c94c2 100644
+--- a/src/output/MonitorResources.cpp
++++ b/src/output/MonitorResources.cpp
+@@ -94,7 +94,7 @@ bool CMonitorResources::hasMirrorFB() const {
+ }
+ 
+ bool CMonitorResources::shouldKeepMirrorFB() const {
+-    return !m_monitor->m_mirrors.empty() || Screenshare::mgr()->isOutputBeingSSd(m_monitor.lock());
++    return !m_monitor->m_mirrors.empty() || m_monitor->isVirtualRegion() || Screenshare::mgr()->isOutputBeingSSd(m_monitor.lock());
+ }
+ 
+ void CMonitorResources::releaseMirrorFB() {
+diff --git a/src/output/OutputCommitCoordinator.cpp b/src/output/OutputCommitCoordinator.cpp
+index 133827029..03c7c362c 100644
+--- a/src/output/OutputCommitCoordinator.cpp
++++ b/src/output/OutputCommitCoordinator.cpp
+@@ -175,7 +175,7 @@ void COutputCommitCoordinator::submitted(SFrame& frame, bool async) {
+     if (frame.kind == FRAME_COMPOSED) {
+         if (!frame.copyFBPrepared)
+             m_monitor->resources()->markMirrorFBStale(frame.renderedDamage);
+-        if (!m_monitor->m_mirrors.empty())
++        if (!m_monitor->m_mirrors.empty() || m_monitor->isVirtualRegion())
+             g_pHyprRenderer->damageMirrorsWith(m_monitor->m_self.lock(), frame.renderedDamage);
+     } else if (!frame.copyFBPrepared)
+         m_monitor->resources()->markMirrorFBStale();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 4bbb60661..6ad901708 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -2245,6 +2245,24 @@ void IHyprRenderer::renderMirrored(CRenderContext& ctx) {
+     addPassElement(ctx, makeUnique<CTexPassElement>(std::move(data)));
+ }
+ 
++void IHyprRenderer::renderVirtualRegions(CRenderContext& ctx) {
++    auto host = ctx.m_data.pMonitor;
++
++    addPassElement(ctx, makeUnique<CClearPassElement>(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 1)}));
++
++    for (const auto& regionRef : host->m_virtual.regions) {
++        const auto REGION = regionRef.lock();
++        if (!REGION || !REGION->resources() || !REGION->resources()->hasMirrorFB())
++            continue;
++
++        CTexPassElement::SRenderData data;
++        data.tex = REGION->resources()->getMirrorTexture();
++        data.box = {REGION->m_virtual.pixelOffset, REGION->m_transformedSize};
++
++        addPassElement(ctx, makeUnique<CTexPassElement>(std::move(data)));
++    }
++}
++
+ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
+     if (m_renderingMonitor || m_context.active() || !pMonitor)
+         return;
+@@ -2411,7 +2429,7 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
+         renderWindow(ctx, pMonitor->m_solitaryClient.lock(), pMonitor, pMonitor->m_solitaryClient->presentation().renderPresentation(), NOW, false,
+                      RENDER_PASS_MAIN /* solitary = no popups */);
+     else if (!finalDamage.empty()) {
+-        const bool    IS_MIRROR = pMonitor->isMirror();
++        const bool    IS_MIRROR = pMonitor->isHiddenFromLayout();
+         CMonitorScene scene(pMonitor);
+         scene.draw(ctx, NOW);
+ 
+@@ -3116,6 +3134,12 @@ void IHyprRenderer::damageMirrorsWith(PHLMONITOR pMonitor, const CRegion& pRegio
+         if (auto m = mirror.lock())
+             m->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_DAMAGE);
+     }
++
++    if (const auto HOST = pMonitor->m_virtual.host.lock()) {
++        CRegion onHost{pRegion};
++        onHost.translate(pMonitor->m_virtual.pixelOffset);
++        HOST->addDamage(onHost);
++    }
+ }
+ 
+ void IHyprRenderer::renderDragIcon(CRenderContext& ctx, PHLMONITOR pMonitor, const Time::steady_tp& time) {
+diff --git a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+index a5307fab6..6095a505c 100644
+--- a/src/render/Renderer.hpp
++++ b/src/render/Renderer.hpp
+@@ -251,6 +251,7 @@ namespace Render {
+         virtual void              renderOffToMain(CRenderContext& ctx, SP<IFramebuffer> off)                    = 0;
+         virtual SP<IRenderbuffer> getOrCreateRenderbufferInternal(SP<Aquamarine::IBuffer> buffer, uint32_t fmt) = 0;
+         void                      renderMirrored(CRenderContext& ctx);
++        void                      renderVirtualRegions(CRenderContext& ctx);
+         void                      setDamage(CRenderContext& ctx, const CRegion& damage_, std::optional<CRegion> finalDamage);
+         // if RENDER_MODE_NORMAL, provided damage will be written to.
+         // otherwise, it will be the one used.
+diff --git a/src/render/scene/MonitorScene.cpp b/src/render/scene/MonitorScene.cpp
+index c6de3ff10..61c521018 100644
+--- a/src/render/scene/MonitorScene.cpp
++++ b/src/render/scene/MonitorScene.cpp
+@@ -15,9 +15,12 @@ void CMonitorScene::draw(CRenderContext& ctx, const Time::steady_tp& now) {
+     if (!MONITOR)
+         return;
+ 
+-    if (MONITOR->isMirror()) {
++    if (MONITOR->isHiddenFromLayout()) {
+         g_pHyprRenderer->blend(false);
+-        g_pHyprRenderer->renderMirrored(ctx);
++        if (MONITOR->isVirtualHost())
++            g_pHyprRenderer->renderVirtualRegions(ctx);
++        else
++            g_pHyprRenderer->renderMirrored(ctx);
+         g_pHyprRenderer->blend(true);
+         Event::bus()->m_events.render.stage.emit({RENDER_POST_MIRROR, MONITOR, ctx});
+         return;
+-- 
+2.56.0
+
