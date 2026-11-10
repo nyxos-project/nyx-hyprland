@@ -2,7 +2,9 @@
 //
 // Windows tagged nyx-controls-custom-headerbar (third-party apps without usable
 // controls; the tags come from [window_controls] in shell.toml through
-// nyx-shellctl window-controls --apply) get a Nyx headerbar: the title, then maximize
+// nyx-shellctl window-controls --apply), and untagged Wayland windows that left their
+// decorations to the compositor (xdg-decoration: Qt, mpv, foot and the like; off with
+// plugin:nyx_decor:server_side_headerbar), get a Nyx headerbar: the title, then maximize
 // (expand when tiled), float or tile, and close. Dialogs and transient windows get
 // none. Empty space drags a floating window, a double-click maximizes, and a
 // right-click opens Nyx Shell's window menu (custom>>nyx-window-menu,ADDRESS,X,Y).
@@ -28,6 +30,8 @@
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/protocols/XDGDecoration.hpp>
+#include <hyprland/src/protocols/XDGShell.hpp>
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
 
 #include <algorithm>
@@ -90,15 +94,47 @@ namespace {
         return !w->backend().parent() && !TRAITS.transient && !TRAITS.modal && !TRAITS.overrideRedirect;
     }
 
+    // Hyprland keeps its xdg-decoration objects (xdg_toplevel -> decoration) private;
+    // an explicit instantiation may name a private member.
+    using DecorationMap = std::unordered_map<wl_resource*, UP<CXDGDecoration>>;
+    DecorationMap CXDGDecorationProtocol::*decorationsMember();
+    template <DecorationMap CXDGDecorationProtocol::*M>
+    struct SDecorationsMember {
+        friend DecorationMap CXDGDecorationProtocol::*decorationsMember() {
+            return M;
+        }
+    };
+    template struct SDecorationsMember<&CXDGDecorationProtocol::m_decorations>;
+
+    // Whether `w` left its decorations to the compositor: a Wayland client with an
+    // xdg-decoration object, which Hyprland always answers with server-side, so the
+    // client draws no title bar or buttons.
+    bool serverSide(const PHLWINDOW& w) {
+        if (!PROTO::xdgDecoration || w->backend().isX11())
+            return false;
+        const auto SURFACE = w->backend().surface();
+        for (const auto& [toplevel, deco] : (*PROTO::xdgDecoration).*decorationsMember()) {
+            const auto TOP = CXDGToplevelResource::fromResource(toplevel);
+            if (TOP && TOP->m_owner && TOP->m_owner->m_surface.lock() == SURFACE)
+                return true;
+        }
+        return false;
+    }
+
     // Give `w` a headerbar or the chromeless control, or take it away, as its tags and
     // the settings say. The control stays on the window and shows only while it floats.
+    // A window no rule tags gets a headerbar when it left its decorations to the
+    // compositor.
     void sync(const PHLWINDOW& w) {
         if (!w)
             return;
-        const bool OK   = Nyx::settings.enabled->value() && decoratable(w);
-        const auto& TAGS = w->m_ruleApplicator->m_tagKeeper;
-        keep(Nyx::bars, w, OK && TAGS.isTagged(Nyx::HEADERBAR_TAG));
-        keep(Nyx::buttons, w, OK && !TAGS.isTagged(Nyx::HEADERBAR_TAG) && TAGS.isTagged(Nyx::CHROMELESS_TAG));
+        const bool  OK         = Nyx::settings.enabled->value() && decoratable(w);
+        const auto& TAGS       = w->m_ruleApplicator->m_tagKeeper;
+        const bool  CHROMELESS = TAGS.isTagged(Nyx::CHROMELESS_TAG);
+        const bool  RULED      = CHROMELESS || TAGS.isTagged(Nyx::NATIVE_TAG) || TAGS.isTagged(Nyx::PRESERVE_TAG);
+        const bool  BAR        = TAGS.isTagged(Nyx::HEADERBAR_TAG) || (!RULED && Nyx::settings.serverSide->value() && serverSide(w));
+        keep(Nyx::bars, w, OK && BAR);
+        keep(Nyx::buttons, w, OK && !BAR && CHROMELESS);
     }
 
     void syncAll() {
@@ -209,6 +245,7 @@ namespace {
             return v;
         };
         s.enabled = add(makeShared<CBoolValue>("plugin:nyx_decor:enabled", "Nyx headerbars on windows tagged nyx-controls-custom-headerbar", true));
+        s.serverSide = add(makeShared<CBoolValue>("plugin:nyx_decor:server_side_headerbar", "A headerbar on apps that leave their decorations to the compositor", true));
         s.height  = add(makeShared<CIntValue>("plugin:nyx_decor:height", "Headerbar height in logical pixels", 32, SIntValueOptions{.min = 24, .max = 48}));
         s.fontSize   = add(makeShared<CIntValue>("plugin:nyx_decor:font_size", "Title size in points", 12, SIntValueOptions{.min = 6, .max = 24}));
         s.fontFamily = add(makeShared<CStringValue>("plugin:nyx_decor:font_family", "Title font (empty: sans-serif)", ""));
