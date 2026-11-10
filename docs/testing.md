@@ -2,7 +2,7 @@
 
 ## Never run a test compositor in a graphical session
 
-`hyprtester` starts its own Hyprland. In 0.57.1 that Hyprland ignores
+`hyprtester` starts its own Hyprland. In 0.57 that Hyprland ignores
 `HYPRLAND_HEADLESS_ONLY`, so it picks its backends from the environment:
 
 - With `WAYLAND_DISPLAY` set, it opens a window on the running desktop.
@@ -24,8 +24,8 @@ PKG_CONFIG_PATH=$HOME/Projects/nyx-hyprland/.deps/prefix/lib/pkgconfig \
 ./build/hyprland_gtests --gtest_filter='VirtualRegions.*:*Monitor*:*Workspace*:*Resolver*'
 ```
 
-The private prefix holds hyprutils 0.14.3 and aquamarine 0.16.0 for a laptop whose
-package database predates them. Once Arch's `extra` versions are installed, drop
+The private prefix holds hyprutils 0.14.3 and aquamarine 0.16.0 (what 0.57 needs) for a
+laptop whose package database predates them. Once Arch's `extra` versions are installed, drop
 `PKG_CONFIG_PATH`.
 
 **Nyx crates** (pure tests, no Hyprland). Until `nyx-core` is pushed and the pins move,
@@ -71,7 +71,7 @@ What has actually run:
 
 ## Manual checklist (physical ultrawide)
 
-Install `hyprland-nyx` 0.57.1, log in again, and set
+Install `hyprland-nyx` 0.57.2, log in again, and set
 `experimental:virtual_monitors = true`. Keep a second way in, such as an SSH session or
 a TTY, with `hyprctl dispatch 'hl.dsp.virtual_monitor.disable_all()'` ready.
 
@@ -80,6 +80,7 @@ a TTY, with `hyprctl dispatch 'hl.dsp.virtual_monitor.disable_all()'` ready.
 | Split | 2 and 3 equal, center-focused and custom regions: no gap, no overlap, sharp text at fractional scale |
 | Isolation | Switch every workspace on each region; the others never change |
 | Looping | Workspace 10 → next → 1 and back on each region, by keyboard, wheel and swipe |
+| Keys | Super + 1…0 on each region reach that region's workspaces (NyxOS); Omarchy's blocks per region (Omarchy) |
 | Targeting | `workspace_target = pointer`: shortcuts follow the pointer's region |
 | Windows | Tiled and floating windows moved, and dragged across region edges; geometry right afterwards |
 | Fullscreen | In each region, with the others still usable; physical fullscreen merges and comes back |

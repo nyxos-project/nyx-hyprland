@@ -23,7 +23,7 @@ hl.virtual_monitor({ output = "DP-3", regions = { 20, 55, 25 }, workspaces = 10 
 |---|---|
 | `output` | The physical output: a connector name or `desc:` |
 | `regions` or `count` + `layout` | Proportions, or a preset: `equal`, `center-focused` |
-| `workspaces` | Persistent workspaces on each region after the first (1 to 10) |
+| `workspaces` | Persistent workspaces on each region after the first (1 to 10); `0` leaves numbering to the config |
 | `enabled` | `false` means no split |
 | `confirm` | Seconds a runtime change waits for `hl.dsp.virtual_monitor.confirm()` before reverting |
 | `profile` | A label only |
@@ -41,8 +41,9 @@ hl.virtual_monitor({ output = "DP-3", regions = { 20, 55, 25 }, workspaces = 10 
 - `disable_all()`: recovery, lasting until the next config reload
 
 **Workspace selector**
-- `v~N`: workspace N of the target region, or plain N on any other monitor. Bind
-  `SUPER+N` to `v~N` to get per-region workspaces.
+- `v~N`: workspace N of the target region, or plain N on any other monitor.
+- Nyx's generated file rebinds Super + 1…0 (and with Shift, and Shift + Alt) to `v~N`
+  while a screen is split, so each region's keys reach its own workspaces.
 
 **IPC**
 - `hyprctl monitors` has a `virtual` field: `null`, a region's host, index, count,
@@ -100,6 +101,9 @@ physical output (DRM)  ← host CMonitor: hidden like a mirror, draws its region
   never match a region. Nothing claims to be a connector.
 
 **Workspaces**
+- Under Omarchy, which numbers every monitor's workspaces itself (a block of ten per
+  screen, regions included), the generated file sets `workspaces = 0`: regions own no
+  range, `v~N` is plain N, and Omarchy's own keys are kept.
 - The first region of the first split output keeps the ordinary workspaces, so splitting
   moves nothing.
 - Region slot `s` (counted across groups, three per group) owns `s*100+1` to
@@ -110,8 +114,9 @@ physical output (DRM)  ← host CMonitor: hidden like a mirror, draws its region
 **Merge (full width)**
 - Merging saves each region's active workspace and the focused region, shows the host
   again, moves every workspace onto it, and destroys the region outputs.
-- Restore recreates the regions, moves workspaces back by ID range, and shows the saved
-  workspaces again, recreating them if they were empty and got cleaned up.
+- Restore recreates the regions, puts each workspace back on the region it was on
+  (falling back to its ID range), and shows the saved workspaces again, recreating them
+  if they were empty and got cleaned up.
 - Physical fullscreen is merge plus fullscreen, restored when the window leaves
   fullscreen or closes.
 
@@ -129,7 +134,7 @@ physical output (DRM)  ← host CMonitor: hidden like a mirror, draws its region
 
 ## Patch series
 
-Branch `nyx/0.57.1` in `~/Projects/Hyprland`, exported to `patches/0.57.1/`:
+Branch `nyx/0.57.2` in `~/Projects/Hyprland`, exported to `patches/0.57.2/` (`patches/0.57.1/` has the same series without 0009):
 
 | Patch | Upstream files touched |
 |---|---|
@@ -141,6 +146,7 @@ Branch `nyx/0.57.1` in `~/Projects/Hyprland`, exported to `patches/0.57.1/`:
 | 0006 virtual monitors: dispatchers | `LuaBindingsDispatchers.cpp` |
 | 0007 ipc: expose virtual monitors | `Commands.cpp`, `LuaMonitor.cpp` |
 | 0008 hyprtester: add virtual monitor tests | new `virtual_monitors.cpp` |
+| 0009 virtual monitors: workspaces = 0, merge remembers each workspace's region | `VirtualMonitorManager.*` only |
 
 **Upstream changes:** about 400 lines across 22 files, all small hooks; the rest is in
 new files. With the feature off, every hook takes the upstream path: the checks are on
@@ -158,7 +164,7 @@ new files. With the feature off, every hook takes the upstream path: the checks 
 
 **Packaging**
 - `hyprland-nyx` (Arch) applies every patch in the chosen series directory.
-- NyxOS builds Hyprland's own flake at `v0.57.1` with the same series, read from this
+- NyxOS builds Hyprland's own flake at `v0.57.2` with the same series, read from this
   repository (`nyx-packages`: inputs `hyprland` and `nyx-hyprland`). That needs
   `nix flake lock` after this repository is pushed.
 

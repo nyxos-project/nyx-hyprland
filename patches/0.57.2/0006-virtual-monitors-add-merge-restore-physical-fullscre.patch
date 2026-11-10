@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Mon, 9 Nov 2026 23:11:18 -0600
+Subject: [PATCH] virtual monitors: add merge, restore, physical fullscreen and
+ recovery dispatchers
+
+hl.dsp.virtual_monitor.{merge,restore,toggle_merge,fullscreen,confirm,disable_all},
+and hl.dsp.window.fullscreen({ mode = "physical" }), which merges the regions
+for the window and restores them when it leaves fullscreen or closes.
+---
+ .../lua/bindings/LuaBindingsDispatchers.cpp   | 97 +++++++++++++++++++
+ 1 file changed, 97 insertions(+)
+
+diff --git a/src/config/lua/bindings/LuaBindingsDispatchers.cpp b/src/config/lua/bindings/LuaBindingsDispatchers.cpp
+index c27771646..f22960708 100644
+--- a/src/config/lua/bindings/LuaBindingsDispatchers.cpp
++++ b/src/config/lua/bindings/LuaBindingsDispatchers.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "../../../managers/fullscreen/FullscreenController.hpp"
+ #include "../../../state/MonitorState.hpp"
++#include "../../../output/VirtualMonitorManager.hpp"
+ #include "../../../state/WorkspaceState.hpp"
+ #include "../../../state/workspace/Resolver.hpp"
+ #include "../../../workspace/WorkspaceUtils.hpp"
+@@ -705,12 +706,20 @@ static int hlWindowFloat(lua_State* L) {
+     return 1;
+ }
+ 
++static int dsp_virtualFullscreen(lua_State* L);
++
+ static int hlWindowFullscreen(lua_State* L) {
+     Fullscreen::eFullscreenMode mode        = Fullscreen::FSMODE_FULLSCREEN;
+     int                         action      = 0; // 0: toggle, 1: set, 2: unset
+     bool                        layoutAware = true;
+     if (lua_istable(L, 1)) {
+         auto m = Internal::tableOptStr(L, 1, "mode");
++        if (m && *m == "physical") {
++            Internal::pushWindowUpval(L, 1);
++            lua_pushcclosure(L, dsp_virtualFullscreen, 1);
++            return 1;
++        }
++
+         if (m) {
+             if (*m == "maximized" || *m == "1")
+                 mode = Fullscreen::FSMODE_MAXIMIZED;
+@@ -1170,6 +1179,85 @@ static int hlFocus(lua_State* L) {
+     return Internal::configError(L, "hl.focus: unrecognized arguments. Expected one of: direction, monitor, window, urgent_or_last, last");
+ }
+ 
++static CA::ActionResult virtualResult(std::expected<void, std::string>&& res) {
++    if (!res)
++        return CA::actionError(std::move(res.error()), WARN, C_INVARG);
++    return {};
++}
++
++static PHLMONITOR virtualMonitorFromUpval(lua_State* L) {
++    if (lua_isnil(L, lua_upvalueindex(1)))
++        return Desktop::focusState()->monitor();
++    return State::monitorState()->query().relativeTo(Desktop::focusState()->monitor()).configString(lua_tostring(L, lua_upvalueindex(1))).run();
++}
++
++static int dsp_virtualMerge(lua_State* L) {
++    return Internal::checkResult(L, virtualResult(Monitor::virtualMonitors()->merge(virtualMonitorFromUpval(L))));
++}
++
++static int dsp_virtualRestore(lua_State* L) {
++    return Internal::checkResult(L, virtualResult(Monitor::virtualMonitors()->restore(virtualMonitorFromUpval(L))));
++}
++
++static int dsp_virtualToggleMerge(lua_State* L) {
++    return Internal::checkResult(L, virtualResult(Monitor::virtualMonitors()->toggleMerge(virtualMonitorFromUpval(L))));
++}
++
++static int dsp_virtualFullscreen(lua_State* L) {
++    const auto W = Internal::windowFromUpval(L, 1);
++    return Internal::checkResult(L, virtualResult(Monitor::virtualMonitors()->togglePhysicalFullscreen(W ? *W : Desktop::focusState()->window())));
++}
++
++static int dsp_virtualConfirm(lua_State* L) {
++    return Internal::checkResult(L, virtualResult(Monitor::virtualMonitors()->confirm()));
++}
++
++static int dsp_virtualDisableAll(lua_State* L) {
++    Monitor::virtualMonitors()->disableAll("requested with hl.dsp.virtual_monitor.disable_all");
++    return Internal::checkResult(L, CA::ActionResult{});
++}
++
++static int pushVirtualMonitorDispatcher(lua_State* L, lua_CFunction fn, const char* name) {
++    std::optional<std::string> monStr;
++    if (lua_istable(L, 1))
++        monStr = Internal::tableOptMonitorSelector(L, 1, "monitor", name);
++
++    if (monStr)
++        lua_pushstring(L, monStr->c_str());
++    else
++        lua_pushnil(L);
++    lua_pushcclosure(L, fn, 1);
++    return 1;
++}
++
++static int hlVirtualMerge(lua_State* L) {
++    return pushVirtualMonitorDispatcher(L, dsp_virtualMerge, "hl.dsp.virtual_monitor.merge");
++}
++
++static int hlVirtualRestore(lua_State* L) {
++    return pushVirtualMonitorDispatcher(L, dsp_virtualRestore, "hl.dsp.virtual_monitor.restore");
++}
++
++static int hlVirtualToggleMerge(lua_State* L) {
++    return pushVirtualMonitorDispatcher(L, dsp_virtualToggleMerge, "hl.dsp.virtual_monitor.toggle_merge");
++}
++
++static int hlVirtualFullscreen(lua_State* L) {
++    Internal::pushWindowUpval(L, 1);
++    lua_pushcclosure(L, dsp_virtualFullscreen, 1);
++    return 1;
++}
++
++static int hlVirtualConfirm(lua_State* L) {
++    lua_pushcclosure(L, dsp_virtualConfirm, 0);
++    return 1;
++}
++
++static int hlVirtualDisableAll(lua_State* L) {
++    lua_pushcclosure(L, dsp_virtualDisableAll, 0);
++    return 1;
++}
++
+ static int dsp_noop(lua_State* L) {
+     return 0;
+ }
+@@ -1368,6 +1456,15 @@ void Internal::registerDispatcherBindings(lua_State* L) {
+         Internal::setDispatcherFn(L, "toggle_special", hlWorkspaceToggleSpecial, 1);
+         lua_setfield(L, -2, "workspace");
+ 
++        lua_newtable(L);
++        Internal::setDispatcherFn(L, "merge", hlVirtualMerge, 1);
++        Internal::setDispatcherFn(L, "restore", hlVirtualRestore, 1);
++        Internal::setDispatcherFn(L, "toggle_merge", hlVirtualToggleMerge, 1);
++        Internal::setDispatcherFn(L, "fullscreen", hlVirtualFullscreen, 1);
++        Internal::setDispatcherFn(L, "confirm", hlVirtualConfirm, 0);
++        Internal::setDispatcherFn(L, "disable_all", hlVirtualDisableAll, 0);
++        lua_setfield(L, -2, "virtual_monitor");
++
+         Internal::setDispatcherFn(L, "exec_cmd", hlExecCmd, 2);
+         Internal::setDispatcherFn(L, "exec_raw", hlExecRaw, 1);
+         Internal::setDispatcherFn(L, "exit", hlExit, 0);
+-- 
+2.56.0
+

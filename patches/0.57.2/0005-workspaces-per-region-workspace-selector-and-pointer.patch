@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Mon, 9 Nov 2026 23:11:18 -0600
+Subject: [PATCH] workspaces: per-region workspace selector and pointer
+ targeting
+
+v~N picks workspace N of the target virtual monitor, and plain N anywhere
+else. With virtual_monitors:workspace_target = pointer, workspace actions and
+swipes between regions act on the region under the pointer.
+---
+ src/config/shared/actions/ConfigActions.cpp         | 6 +++++-
+ src/managers/input/UnifiedWorkspaceSwipeGesture.cpp | 2 ++
+ src/state/workspace/Resolver.cpp                    | 9 +++++++++
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/config/shared/actions/ConfigActions.cpp b/src/config/shared/actions/ConfigActions.cpp
+index 69adc229c..8061f3c7b 100644
+--- a/src/config/shared/actions/ConfigActions.cpp
++++ b/src/config/shared/actions/ConfigActions.cpp
+@@ -2,6 +2,7 @@
+ #include "../parserUtils/ParserUtils.hpp"
+ #include "../../ConfigManager.hpp"
+ #include "../../../desktop/state/FocusState.hpp"
++#include "../../../output/VirtualMonitorManager.hpp"
+ #include "../../../desktop/state/GlobalWindowController.hpp"
+ #include "../../../desktop/state/WindowState.hpp"
+ #include "../../../desktop/view/window/Window.hpp"
+@@ -170,7 +171,9 @@ static PHLWORKSPACE findOrCreateWorkspace(const std::string& args, bool isEmpty)
+ static PHLWORKSPACE resolveWorkspaceForChange(const std::string& args) {
+     static auto PBACKANDFORTH = CConfigValue<Config::INTEGER>("binds:workspace_back_and_forth");
+ 
+-    const auto  PMONITOR = Desktop::focusState()->monitor();
++    Monitor::virtualMonitors()->retargetForWorkspaceAction();
++
++    const auto PMONITOR = Desktop::focusState()->monitor();
+     if (!PMONITOR)
+         return nullptr;
+ 
+@@ -439,6 +442,7 @@ ActionResult Actions::moveToWorkspace(PHLWORKSPACE ws, bool silent, std::optiona
+ }
+ 
+ ActionResult Actions::moveToWorkspace(const std::string& ws, bool silent, std::optional<PHLWINDOW> w) {
++    Monitor::virtualMonitors()->retargetForWorkspaceAction();
+     const auto WORKSPACE = findOrCreateWorkspace(ws, false);
+     const auto res       = Actions::moveToWorkspace(WORKSPACE, silent, w);
+     if (WORKSPACE)
+diff --git a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+index 2204bd12c..820138744 100644
+--- a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
++++ b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+@@ -4,6 +4,7 @@
+ #include "../../state/WorkspaceState.hpp"
+ #include "../../state/workspace/Resolver.hpp"
+ #include "../../desktop/state/FocusState.hpp"
++#include "../../output/VirtualMonitorManager.hpp"
+ #include "../../render/Renderer.hpp"
+ #include "InputManager.hpp"
+ #include "../../layout/space/Space.hpp"
+@@ -168,6 +169,7 @@ void CUnifiedWorkspaceSwipeGesture::cancel() {
+ }
+ 
+ void CUnifiedWorkspaceSwipeGesture::begin() {
++    Monitor::virtualMonitors()->retargetForWorkspaceAction();
+     begin(Desktop::focusState()->monitor());
+ }
+ 
+diff --git a/src/state/workspace/Resolver.cpp b/src/state/workspace/Resolver.cpp
+index f0ac2c1ef..f9d7e26d3 100644
+--- a/src/state/workspace/Resolver.cpp
++++ b/src/state/workspace/Resolver.cpp
+@@ -6,6 +6,7 @@
+ #include "../../desktop/history/WorkspaceHistoryTracker.hpp"
+ #include "../../config/shared/workspace/WorkspaceRuleManager.hpp"
+ #include "../MonitorState.hpp"
++#include "../../output/VirtualMonitorManager.hpp"
+ 
+ #include <hyprutils/string/Numeric.hpp>
+ #include <hyprutils/string/String.hpp>
+@@ -200,6 +201,14 @@ State::Workspace::STarget CWorkspaceResolver::getWorkspaceTargetFromString(const
+         return CURRENT && *CURRENT < UINT32_MAX ? numberedTarget(*CURRENT + 1) : State::Workspace::STarget{};
+     }
+ 
++    // v~N: workspace N of the target virtual monitor, or plain N on any other monitor
++    if (in.size() > 2 && in[0] == 'v' && in[1] == '~' && isNumber(in.substr(2))) {
++        const auto NUMBER = workspaceOffset(in.substr(2));
++        if (!NUMBER || *NUMBER <= 0 || *NUMBER > 99)
++            return {};
++        return numberedTarget(Monitor::virtualMonitors()->workspaceIDFor(BASEMONITOR, sc<uint32_t>(*NUMBER)));
++    }
++
+     if (in.size() > 2 && in[0] == 'r' && (in[1] == '-' || in[1] == '+' || in[1] == '~') && isNumber(in.substr(2))) {
+         const bool ABSOLUTE = in[1] == '~';
+         if (!BASEMONITOR)
+-- 
+2.56.0
+

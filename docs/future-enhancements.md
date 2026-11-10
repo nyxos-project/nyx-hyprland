@@ -1,6 +1,6 @@
 # Further compositor enhancements: assessment
 
-None of these is implemented. For each: what Hyprland 0.57.1 already does, what would
+None of these is implemented. For each: what Hyprland 0.57.2 already does, what would
 change where, the risks, and a recommendation. Priority 1 means it's worth doing next.
 
 ## Agent workspaces
