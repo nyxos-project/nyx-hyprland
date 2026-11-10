@@ -3,13 +3,13 @@
 # rebuilt with it: the plugin refuses to load into another Hyprland build.
 
 CXXFLAGS ?= -O2
-PKGS = hyprland pixman-1 libdrm libinput libudev wayland-server xkbcommon cairo pangocairo
-SRC = main.cpp HeaderBar.cpp CornerButton.cpp
+PKGS = hyprland pixman-1 libdrm libinput libudev wayland-server xkbcommon cairo pangocairo hyprgraphics
+SRC = main.cpp HeaderBar.cpp CornerButton.cpp AppIcon.cpp
 PREFIX ?= /usr/local
 
 all: nyx-decor.so
 
-nyx-decor.so: $(SRC) globals.hpp HeaderBar.hpp CornerButton.hpp
+nyx-decor.so: $(SRC) globals.hpp HeaderBar.hpp CornerButton.hpp AppIcon.hpp
 	$(CXX) -shared -fPIC --no-gnu-unique -std=c++2c $(CXXFLAGS) $(SRC) -o $@ `pkg-config --cflags $(PKGS)` $(EXTRA_CFLAGS)
 
 install: nyx-decor.so

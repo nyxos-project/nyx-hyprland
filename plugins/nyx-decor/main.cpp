@@ -14,6 +14,7 @@
 // puts it back there (Hyprland keeps only the size), kept inside its monitor's work
 // area. That holds however the mode changes (a key, a Nyx control, a dispatcher).
 
+#include "AppIcon.hpp"
 #include "CornerButton.hpp"
 #include "HeaderBar.hpp"
 
@@ -251,6 +252,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("[nyx-decor] built for another Hyprland version; rebuild it against this one");
 
     addSettings();
+    Nyx::Icons::start();
 
     auto& ev = Event::bus()->m_events;
     listeners.emplace_back(ev.window.open.listen([](PHLWINDOW w) { sync(w); }));
@@ -278,7 +280,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 BUTTON->pointerAt(pos);
         }
     }));
-    listeners.emplace_back(ev.render.pre.listen([](PHLMONITOR monitor) { remember(monitor); }));
+    listeners.emplace_back(ev.render.pre.listen([](PHLMONITOR monitor) {
+        remember(monitor);
+        // The app icons are known now: the bars draw them.
+        if (Nyx::Icons::justReady()) {
+            for (const auto& b : Nyx::bars) {
+                if (const auto BAR = b.lock())
+                    BAR->damageEntire();
+            }
+        }
+    }));
     listeners.emplace_back(ev.config.reloaded.listen([] { later(syncAll); }));
 
     later(syncAll);
@@ -303,4 +314,5 @@ APICALL EXPORT void PLUGIN_EXIT() {
     Nyx::bars.clear();
     Nyx::buttons.clear();
     floats.clear();
+    Nyx::Icons::stop();
 }

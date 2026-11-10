@@ -71,6 +71,15 @@ class CNyxHeaderBar : public IHyprWindowDecoration {
     };
     std::array<SGlyph, BUTTON_COUNT> m_glyphs;
 
+    // The app's icon, for its file and pixel size.
+    struct SIcon {
+        SP<Render::ITexture> tex;
+        std::string          path;
+        int                  size = 0;
+    } m_icon;
+
+    SP<Render::ITexture> icon(int px);
+
     bool         visible() const;
     bool         focused() const;
     int          barHeight() const;

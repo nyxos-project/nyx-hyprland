@@ -1,4 +1,5 @@
 #include "HeaderBar.hpp"
+#include "AppIcon.hpp"
 
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -14,6 +15,7 @@
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 
 #include <cairo/cairo.h>
+#include <hyprgraphics/image/Image.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -214,6 +216,26 @@ SP<ITexture> CNyxHeaderBar::glyph(eButton button, uint64_t c, int px) {
     return g.tex;
 }
 
+SP<ITexture> CNyxHeaderBar::icon(int px) {
+    const auto W = m_window.lock();
+    if (!W)
+        return nullptr;
+    const auto PATH = Nyx::Icons::pathFor(W->metadata().appID(), W->metadata().initialAppID());
+    if (PATH.empty())
+        return nullptr;
+    if (m_icon.path != PATH || m_icon.size != px) {
+        m_icon.path = PATH;
+        m_icon.size = px;
+        m_icon.tex  = nullptr;
+        Hyprgraphics::CImage image(PATH, Vector2D{sc<double>(px), sc<double>(px)});
+        if (image.success() && image.cairoSurface())
+            m_icon.tex = g_pHyprRenderer->createTexture(image.cairoSurface()->cairo());
+        // One more frame, as the one it was made in may be under way already.
+        damageEntire();
+    }
+    return m_icon.tex;
+}
+
 SP<ITexture> CNyxHeaderBar::title(uint64_t c, int maxWidth, float scale) {
     const auto W = m_window.lock();
     if (!W || maxWidth <= 0)
@@ -287,13 +309,24 @@ void CNyxHeaderBar::draw(CRenderContext& ctx, PHLMONITOR monitor, float const& a
         g_pHyprRenderer->addPassElement(ctx, makeUnique<CTexPassElement>(std::move(data)));
     }
 
+    // The app's icon, when one is known, then the title.
+    double     left     = BOX.x + std::round(TITLE_PAD * SCALE);
+    const int  ICON_PX  = sc<int>(std::round(BOX.h * 0.56));
+    if (const auto ICON = icon(ICON_PX)) {
+        CTexPassElement::SRenderData data;
+        data.tex = ICON;
+        data.box = CBox{left, BOX.y + std::round((BOX.h - ICON_PX) / 2), sc<double>(ICON_PX), sc<double>(ICON_PX)};
+        data.a   = a * (ACTIVE ? 1.F : 0.7F);
+        g_pHyprRenderer->addPassElement(ctx, makeUnique<CTexPassElement>(std::move(data)));
+        left += ICON_PX + std::round(8 * SCALE);
+    }
     const CBox LEFTMOST  = toLocal(buttonBox(BAR, BUTTON_MAXIMIZE));
-    const int  MAXWIDTH  = sc<int>(LEFTMOST.x - BOX.x - 2 * TITLE_PAD * SCALE);
+    const int  MAXWIDTH  = sc<int>(LEFTMOST.x - left - TITLE_PAD * SCALE);
     const auto TITLE_TEX = title(sc<uint64_t>((ACTIVE ? Nyx::settings.text : Nyx::settings.textInactive)->value()), MAXWIDTH, SCALE);
     if (TITLE_TEX) {
         CTexPassElement::SRenderData data;
         data.tex = TITLE_TEX;
-        data.box = CBox{BOX.x + std::round(TITLE_PAD * SCALE), BOX.y + std::round((BOX.h - TITLE_TEX->m_size.y) / 2), TITLE_TEX->m_size.x, TITLE_TEX->m_size.y};
+        data.box = CBox{left, BOX.y + std::round((BOX.h - TITLE_TEX->m_size.y) / 2), TITLE_TEX->m_size.x, TITLE_TEX->m_size.y};
         data.a   = a;
         g_pHyprRenderer->addPassElement(ctx, makeUnique<CTexPassElement>(std::move(data)));
     }
