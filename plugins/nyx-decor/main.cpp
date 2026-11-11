@@ -21,6 +21,7 @@
 #include "HeaderBar.hpp"
 
 #include <hyprland/src/desktop/state/ViewState.hpp>
+#include <hyprland/src/ipc/s1/S1.hpp>
 #include <hyprland/src/ipc/s2/S2.hpp>
 #include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
@@ -121,21 +122,43 @@ namespace {
         return false;
     }
 
+    // Whether `w` gets a headerbar though no rule asks for one: no rule tags it and it
+    // left its decorations to the compositor.
+    bool defaultHeaderbar(const PHLWINDOW& w) {
+        const auto& TAGS = w->m_ruleApplicator->m_tagKeeper;
+        for (const auto& TAG : {Nyx::HEADERBAR_TAG, Nyx::CHROMELESS_TAG, Nyx::NATIVE_TAG, Nyx::PRESERVE_TAG}) {
+            if (TAGS.isTagged(TAG))
+                return false;
+        }
+        return Nyx::settings.serverSide->value() && serverSide(w);
+    }
+
     // Give `w` a headerbar or the chromeless control, or take it away, as its tags and
     // the settings say. The control stays on the window and shows only while it floats.
-    // A window no rule tags gets a headerbar when it left its decorations to the
-    // compositor.
     void sync(const PHLWINDOW& w) {
         if (!w)
             return;
-        const bool  OK         = Nyx::settings.enabled->value() && decoratable(w);
-        const auto& TAGS       = w->m_ruleApplicator->m_tagKeeper;
-        const bool  CHROMELESS = TAGS.isTagged(Nyx::CHROMELESS_TAG);
-        const bool  RULED      = CHROMELESS || TAGS.isTagged(Nyx::NATIVE_TAG) || TAGS.isTagged(Nyx::PRESERVE_TAG);
-        const bool  BAR        = TAGS.isTagged(Nyx::HEADERBAR_TAG) || (!RULED && Nyx::settings.serverSide->value() && serverSide(w));
+        const bool  OK   = Nyx::settings.enabled->value() && decoratable(w);
+        const auto& TAGS = w->m_ruleApplicator->m_tagKeeper;
+        const bool  BAR  = TAGS.isTagged(Nyx::HEADERBAR_TAG) || defaultHeaderbar(w);
         keep(Nyx::bars, w, OK && BAR);
-        keep(Nyx::buttons, w, OK && !BAR && CHROMELESS);
+        keep(Nyx::buttons, w, OK && !BAR && TAGS.isTagged(Nyx::CHROMELESS_TAG));
     }
+
+    // `hyprctl -j nyxdecor`: {"default_headerbars": ["0x…", …]}, the windows with a
+    // headerbar no rule asked for, so Nyx Shell Core can say they have one.
+    IPC::Socket1::SResponse describe(const IPC::Socket1::SRequest&) {
+        std::string out = R"({"default_headerbars": [)";
+        bool        first = true;
+        for (const auto& w : Desktop::viewState()->windows()) {
+            if (!w || !Nyx::settings.enabled->value() || !decoratable(w) || !defaultHeaderbar(w))
+                continue;
+            out += std::format(R"({}"0x{:x}")", first ? "" : ", ", rc<uintptr_t>(w.get()));
+            first = false;
+        }
+        return out + "]}";
+    }
+    SP<IPC::Socket1::SCommand> command;
 
     void syncAll() {
         for (const auto& w : Desktop::viewState()->windows())
@@ -328,6 +351,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }
     }));
     listeners.emplace_back(ev.config.reloaded.listen([] { later(syncAll); }));
+    command = HyprlandAPI::registerHyprCtlCommand(handle, {.name = "nyxdecor", .handler = describe});
 
     later(syncAll);
     return {"nyx-decor", "NyxOS window decorations: headerbars for apps without controls, floating geometry", "Design Nexus", "0.1"};
@@ -335,6 +359,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
 APICALL EXPORT void PLUGIN_EXIT() {
     listeners.clear();
+    if (command)
+        HyprlandAPI::unregisterHyprCtlCommand(Nyx::handle, command);
+    command.reset();
     if (g_pEventLoopManager) {
         for (const auto SEQ : pending)
             g_pEventLoopManager->removeDoLater(SEQ);
