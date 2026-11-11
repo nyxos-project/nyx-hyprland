@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Tue, 10 Nov 2026 13:55:04 -0600
+Subject: [PATCH] hyprtester: workspace_swipe_wrap checks the 0.57
+ activeworkspace text
+
+0.57 prints "workspace 13 (13)" where 0.56 printed "workspace ID 13 (13)".
+---
+ hyprtester/src/tests/main/gestures.cpp | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/hyprtester/src/tests/main/gestures.cpp b/hyprtester/src/tests/main/gestures.cpp
+index 693922f83..706e66ce0 100644
+--- a/hyprtester/src/tests/main/gestures.cpp
++++ b/hyprtester/src/tests/main/gestures.cpp
+@@ -406,20 +406,20 @@ TEST_CASE(workspaceSwipeWrap) {
+ 
+     // Without wrap, the swipe stops at the last workspace.
+     OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
+-    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 13 (13)");
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 13 (13)");
+ 
+     OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_wrap = 1 } })"));
+ 
+     OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
+-    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 11 (11)");
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 11 (11)");
+ 
+     OK(getFromSocket("/eval hl.plugin.test.gesture('left', 3)"));
+-    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 13 (13)");
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 13 (13)");
+ 
+     // Wrapping wins over creating a new workspace past the last one.
+     OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_create_new = 1 } })"));
+     OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
+-    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 11 (11)");
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "workspace 11 (11)");
+ 
+     OK(getFromSocket("/eval hl.plugin.test.alt(0)"));
+     OK(getFromSocket("/output remove HEADLESS-WRAP"));
+-- 
+2.56.0
+

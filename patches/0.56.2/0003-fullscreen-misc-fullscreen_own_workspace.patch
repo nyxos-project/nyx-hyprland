@@ -1,0 +1,709 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Tue, 10 Nov 2026 13:40:45 -0600
+Subject: [PATCH] fullscreen: misc:fullscreen_own_workspace
+
+A window that goes truly fullscreen (not maximized) moves to a workspace
+of its own, named fullscreen-<origin>-<n>, that sits right after the
+workspace it came from: a fullscreen started on 2 is between 2 and 3 for
+m+1/m-1, workspace swipes (with or without workspace_swipe_wrap) and the
+slide animation. Leaving fullscreen moves it back and shows its
+workspace, recreating it if the window was its only one; closing it
+returns there too, and the fullscreen workspace goes away. Several
+fullscreen windows from one workspace follow it in the order they went
+fullscreen.
+
+The change is handled once it settles, as moves, floating changes and
+group swaps turn fullscreen off and straight back on. Windows on special
+workspaces, pinned or being dragged, already on a fullscreen workspace,
+moved elsewhere while fullscreen, or tagged fullscreen-in-place stay
+where they are. A new window from another app that opens on a
+fullscreen workspace goes to the workspace it came from; the app's own
+dialogs stay.
+
+r+N/r-N still count by ID: they step over fullscreen workspaces, and
+from one count from the workspace it came from. State lives in the new
+Fullscreen::spaces() manager, so no existing class changes layout.
+---
+ .../src/tests/main/fullscreenSpaces.cpp       | 149 +++++++++++
+ src/Compositor.cpp                            |   4 +
+ src/config/values/ConfigValues.cpp            |   2 +
+ src/helpers/MiscFunctions.cpp                 |  16 +-
+ src/managers/fullscreen/FullscreenSpaces.cpp  | 237 ++++++++++++++++++
+ src/managers/fullscreen/FullscreenSpaces.hpp  |  69 +++++
+ .../input/UnifiedWorkspaceSwipeGesture.cpp    |  13 +-
+ src/output/Monitor.cpp                        |  26 +-
+ 8 files changed, 503 insertions(+), 13 deletions(-)
+ create mode 100644 hyprtester/src/tests/main/fullscreenSpaces.cpp
+ create mode 100644 src/managers/fullscreen/FullscreenSpaces.cpp
+ create mode 100644 src/managers/fullscreen/FullscreenSpaces.hpp
+
+diff --git a/hyprtester/src/tests/main/fullscreenSpaces.cpp b/hyprtester/src/tests/main/fullscreenSpaces.cpp
+new file mode 100644
+index 000000000..db966a006
+--- /dev/null
++++ b/hyprtester/src/tests/main/fullscreenSpaces.cpp
+@@ -0,0 +1,149 @@
++#include "tests.hpp"
++#include "../../shared.hpp"
++#include "../../hyprctlCompat.hpp"
++#include <hyprutils/os/Process.hpp>
++#include <hyprutils/memory/WeakPtr.hpp>
++#include <hyprutils/utils/ScopeGuard.hpp>
++#include "../shared.hpp"
++
++#include <chrono>
++#include <string>
++#include <thread>
++
++using namespace Hyprutils::OS;
++using namespace Hyprutils::Memory;
++using namespace Hyprutils::Utils;
++
++// The move to and from a fullscreen workspace happens once the fullscreen change settles.
++static void settle() {
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));
++}
++
++static std::string activeName() {
++    const auto STR   = getFromSocket("/activeworkspace");
++    const auto BEGIN = STR.find('(');
++    const auto END   = STR.find(')', BEGIN);
++    return BEGIN == std::string::npos || END == std::string::npos ? "" : STR.substr(BEGIN + 1, END - BEGIN - 1);
++}
++
++static std::string focusWorkspace(const std::string& ws) {
++    const auto RESULT = getFromSocket(std::format("/dispatch hl.dsp.focus({{ workspace = '{}' }})", ws));
++    settle();
++    return RESULT;
++}
++
++static std::string fullscreen(const std::string& action) {
++    const auto RESULT = getFromSocket(std::format("/dispatch hl.dsp.window.fullscreen({{ mode = 'fullscreen', action = '{}' }})", action));
++    settle();
++    return RESULT;
++}
++
++TEST_CASE(fullscreenOwnWorkspace) {
++    CScopeGuard guard = {[&]() {
++        Tests::killAllWindows();
++        OK(getFromSocket("/eval hl.plugin.test.alt(0)"));
++        OK(getFromSocket("/reload"));
++    }};
++
++    OK(getFromSocket("/eval hl.config({ misc = { fullscreen_own_workspace = true } })"));
++    OK(getFromSocket("/eval hl.config({ gestures = { workspace_swipe_invert = 0, workspace_swipe_create_new = 0, workspace_swipe_wrap = 0 } })"));
++
++    // Workspaces 2 and 3 each keep a window, so they stay while the fullscreen ones come and go.
++    OK(focusWorkspace("3"));
++    if (!Tests::spawnKitty("fs_three"))
++        FAIL_TEST("Could not spawn kitty");
++    OK(focusWorkspace("2"));
++    if (!Tests::spawnKitty("fs_two"))
++        FAIL_TEST("Could not spawn kitty");
++    if (!Tests::spawnKitty("fs_a"))
++        FAIL_TEST("Could not spawn kitty");
++
++    NLog::log("{}Fullscreen moves to a workspace of its own", Colors::YELLOW);
++    OK(fullscreen("set"));
++    const auto FIRST = activeName();
++    EXPECT(FIRST.starts_with("fullscreen-2-"), true);
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: fs_a");
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "fullscreen: 2");
++
++    NLog::log("{}It sits between 2 and 3", Colors::YELLOW);
++    OK(focusWorkspace("m+1"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 3 (3)");
++    OK(focusWorkspace("m-1"));
++    EXPECT(activeName(), FIRST);
++
++    NLog::log("{}A second one from 2 goes after the first", Colors::YELLOW);
++    OK(focusWorkspace("m-1"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "(2)");
++    if (!Tests::spawnKitty("fs_b"))
++        FAIL_TEST("Could not spawn kitty");
++    OK(fullscreen("set"));
++    const auto SECOND = activeName();
++    EXPECT(SECOND.starts_with("fullscreen-2-"), true);
++    EXPECT(SECOND != FIRST, true);
++    OK(focusWorkspace("m-1"));
++    EXPECT(activeName(), FIRST);
++    OK(focusWorkspace("m+1"));
++    EXPECT(activeName(), SECOND);
++    OK(focusWorkspace("m+1"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 3 (3)");
++
++    NLog::log("{}Swipes go the same way", Colors::YELLOW);
++    OK(getFromSocket("/eval hl.plugin.test.alt(1)"));
++    OK(focusWorkspace("2"));
++    OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
++    settle();
++    EXPECT(activeName(), FIRST);
++    OK(getFromSocket("/eval hl.plugin.test.gesture('right', 3)"));
++    settle();
++    EXPECT(activeName(), SECOND);
++    OK(getFromSocket("/eval hl.plugin.test.gesture('left', 3)"));
++    settle();
++    EXPECT(activeName(), FIRST);
++    OK(getFromSocket("/eval hl.plugin.test.alt(0)"));
++
++    NLog::log("{}Closing one goes back to 2", Colors::YELLOW);
++    OK(focusWorkspace(std::format("name:{}", SECOND)));
++    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:fs_b' })"));
++    OK(getFromSocket("/dispatch hl.dsp.window.kill()"));
++    Tests::waitUntilWindowsN(3);
++    settle();
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 2 (2)");
++    EXPECT(getFromSocket("/workspaces").contains(SECOND), false);
++
++    NLog::log("{}Leaving fullscreen goes back to 2", Colors::YELLOW);
++    OK(focusWorkspace(std::format("name:{}", FIRST)));
++    OK(getFromSocket("/dispatch hl.dsp.focus({ window = 'class:fs_a' })"));
++    OK(fullscreen("unset"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 2 (2)");
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: fs_a");
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "fullscreen: 0");
++    EXPECT(getFromSocket("/workspaces").contains(FIRST), false);
++
++    NLog::log("{}A workspace whose only window went fullscreen comes back", Colors::YELLOW);
++    OK(focusWorkspace("4"));
++    if (!Tests::spawnKitty("fs_c"))
++        FAIL_TEST("Could not spawn kitty");
++    OK(fullscreen("set"));
++    EXPECT(activeName().starts_with("fullscreen-4-"), true);
++    EXPECT(getFromSocket("/workspaces").contains("ID 4 (4)"), false);
++    OK(fullscreen("unset"));
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 4 (4)");
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "class: fs_c");
++    OK(focusWorkspace("2"));
++
++    NLog::log("{}Maximize stays put", Colors::YELLOW);
++    OK(getFromSocket("/dispatch hl.dsp.window.fullscreen({ mode = 'maximized', action = 'set' })"));
++    settle();
++    EXPECT_CONTAINS(getFromSocket("/activeworkspace"), "ID 2 (2)");
++    OK(getFromSocket("/dispatch hl.dsp.window.fullscreen({ mode = 'maximized', action = 'unset' })"));
++    settle();
++
++    NLog::log("{}A special workspace keeps its fullscreen window", Colors::YELLOW);
++    OK(focusWorkspace("special:fs_special"));
++    if (!Tests::spawnKitty("fs_special"))
++        FAIL_TEST("Could not spawn kitty");
++    OK(fullscreen("set"));
++    EXPECT_CONTAINS(getFromSocket("/activewindow"), "(special:fs_special)");
++    EXPECT(getFromSocket("/workspaces").contains("fullscreen-special"), false);
++    OK(getFromSocket("/dispatch hl.dsp.workspace.toggle_special('fs_special')"));
++}
+diff --git a/src/Compositor.cpp b/src/Compositor.cpp
+index 1d2d8b932..089b9b39c 100644
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -18,6 +18,7 @@
+ #include "managers/VersionKeeperManager.hpp"
+ #include "managers/DonationNagManager.hpp"
+ #include "managers/ANRManager.hpp"
++#include "managers/fullscreen/FullscreenSpaces.hpp"
+ #include "managers/eventLoop/EventLoopManager.hpp"
+ #include "managers/permissions/DynamicPermissionManager.hpp"
+ #include "state/FallbackState.hpp"
+@@ -755,6 +756,9 @@ void CCompositor::initManagers(eManagersInitStage stage) {
+             Log::logger->log(Log::DEBUG, "Creating the ANRManager!");
+             g_pANRManager = makeUnique<CANRManager>();
+ 
++            Log::logger->log(Log::DEBUG, "Creating the FullscreenSpaces!");
++            Fullscreen::spaces();
++
+             Log::logger->log(Log::DEBUG, "Starting XWayland");
+             g_pXWayland = makeUnique<CXWayland>(g_pCompositor->m_wantsXwayland);
+         } break;
+diff --git a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+index 427caefbe..6c8f65695 100644
+--- a/src/config/values/ConfigValues.cpp
++++ b/src/config/values/ConfigValues.cpp
+@@ -489,6 +489,8 @@ std::vector<SP<IValue>> Values::getConfigValues() {
+         MS<Bool>("misc:always_follow_on_dnd", "Will make mouse focus follow the mouse when drag and dropping.", true),
+         MS<Bool>("misc:layers_hog_keyboard_focus", "If true, will make keyboard-interactive layers keep their focus on mouse move.", true),
+         MS<Bool>("misc:allow_new_top_layers_over_existing_fullscreen", "If true, allows new top layers to go over a fullscreen window.", true),
++        MS<Bool>("misc:fullscreen_own_workspace",
++                 "If true, a window going fullscreen moves to a workspace of its own, right after the one it was on, and back when it leaves fullscreen.", false),
+         MS<Bool>("misc:animate_manual_resizes", "If true, will animate manual window resizes/moves", false),
+         MS<Bool>("misc:animate_mouse_windowdragging", "If true, will animate windows being dragged by mouse.", false),
+         MS<Bool>("misc:disable_autoreload", "If true, the config will not reload automatically on save.", false, {.refresh = Supplementary::REFRESH_CONFIG_WATCHER}),
+diff --git a/src/helpers/MiscFunctions.cpp b/src/helpers/MiscFunctions.cpp
+index be4f033ab..7135f9903 100644
+--- a/src/helpers/MiscFunctions.cpp
++++ b/src/helpers/MiscFunctions.cpp
+@@ -9,6 +9,7 @@
+ #include "../state/MonitorState.hpp"
+ #include "../state/WorkspaceState.hpp"
+ #include "../config/shared/workspace/WorkspaceRuleManager.hpp"
++#include "../managers/fullscreen/FullscreenSpaces.hpp"
+ #include "fs/FsUtils.hpp"
+ #include <optional>
+ #include <cstring>
+@@ -258,6 +259,10 @@ SWorkspaceIDName getWorkspaceIDNameFromString(const std::string& in) {
+                 if (ws->m_isSpecialWorkspace || (ws->m_monitor != Desktop::focusState()->monitor()) || ws->m_id >= 0)
+                     continue;
+ 
++                // r counts by ID, so fullscreen workspaces (between numbered ones) aren't counted.
++                if (Fullscreen::spaces()->isFullscreenWorkspace(ws->m_id))
++                    continue;
++
+                 namedWSes.push_back(ws->m_id);
+             }
+             std::ranges::sort(namedWSes);
+@@ -282,7 +287,13 @@ SWorkspaceIDName getWorkspaceIDNameFromString(const std::string& in) {
+             } else {
+ 
+                 // Just take a blind guess at where we'll probably end up
+-                WORKSPACEID activeWSID    = Desktop::focusState()->monitor()->m_activeWorkspace ? Desktop::focusState()->monitor()->m_activeWorkspace->m_id : 1;
++                WORKSPACEID activeWSID = Desktop::focusState()->monitor()->m_activeWorkspace ? Desktop::focusState()->monitor()->m_activeWorkspace->m_id : 1;
++                // A fullscreen workspace sits just after the workspace it came from: r+1 is the next one, r-1 that one.
++                if (Fullscreen::spaces()->isFullscreenWorkspace(activeWSID)) {
++                    activeWSID = std::get<0>(Fullscreen::spaces()->navigationKey(activeWSID));
++                    if (in[1] == '-' && activeWSID > 0)
++                        activeWSID++;
++                }
+                 WORKSPACEID predictedWSID = activeWSID + remains;
+                 int         remainingWSes = 0;
+                 char        walkDir       = in[1];
+@@ -405,7 +416,8 @@ SWorkspaceIDName getWorkspaceIDNameFromString(const std::string& in) {
+                 validWSes.push_back(ws->m_id);
+             }
+ 
+-            std::ranges::sort(validWSes);
++            // Fullscreen workspaces sit right after the workspace they came from.
++            std::ranges::sort(validWSes, [](WORKSPACEID a, WORKSPACEID b) { return Fullscreen::spaces()->navigationBefore(a, b); });
+ 
+             ssize_t currentItem = -1;
+ 
+diff --git a/src/managers/fullscreen/FullscreenSpaces.cpp b/src/managers/fullscreen/FullscreenSpaces.cpp
+new file mode 100644
+index 000000000..e23e5c243
+--- /dev/null
++++ b/src/managers/fullscreen/FullscreenSpaces.cpp
+@@ -0,0 +1,237 @@
++#include "FullscreenSpaces.hpp"
++
++#include "FullscreenController.hpp"
++
++#include "../../config/ConfigValue.hpp"
++#include "../../debug/log/Logger.hpp"
++#include "../../desktop/Workspace.hpp"
++#include "../../desktop/state/FocusState.hpp"
++#include "../../desktop/state/GlobalWindowController.hpp"
++#include "../../desktop/view/Window.hpp"
++#include "../../desktop/rule/windowRule/WindowRuleApplicator.hpp"
++#include "../../event/EventBus.hpp"
++#include "../../layout/LayoutManager.hpp"
++#include "../../layout/supplementary/DragController.hpp"
++#include "../../managers/eventLoop/EventLoopManager.hpp"
++#include "../../output/Monitor.hpp"
++#include "../../state/WorkspaceState.hpp"
++
++#include <algorithm>
++#include <format>
++
++using namespace Fullscreen;
++
++UP<CFullscreenSpaces>& Fullscreen::spaces() {
++    static UP<CFullscreenSpaces> p = makeUnique<CFullscreenSpaces>();
++    return p;
++}
++
++CFullscreenSpaces::CFullscreenSpaces() {
++    static auto P1 = Event::bus()->m_events.window.fullscreen.listen([this](PHLWINDOW window) { scheduleCheck(window); });
++    static auto P2 = Event::bus()->m_events.window.close.listen([this](PHLWINDOW window) { onClose(window); });
++    static auto P3 = Event::bus()->m_events.window.open.listen([this](PHLWINDOW window) { onOpen(window); });
++    static auto P4 = Event::bus()->m_events.window.destroy.listen([this](PHLWINDOWREF window) {
++        std::erase_if(m_records, [&](const auto& r) { return !r.window || r.window == window; });
++        std::erase_if(m_inPlace, [&](const auto& w) { return !w || w == window; });
++    });
++    static auto P5 = Event::bus()->m_events.workspace.removed.listen([this](PHLWORKSPACEREF) {
++        // A fullscreen workspace keeps its place in the order only while it exists.
++        std::erase_if(m_spaces, [](const auto& e) { return !State::workspaceState()->query().id(e.first).run(); });
++    });
++}
++
++std::tuple<WORKSPACEID, int, uint64_t> CFullscreenSpaces::navigationKey(WORKSPACEID id) const {
++    if (const auto IT = m_spaces.find(id); IT != m_spaces.end())
++        return {IT->second.origin, 1, IT->second.serial};
++    return {id, 0, 0};
++}
++
++bool CFullscreenSpaces::navigationBefore(WORKSPACEID a, WORKSPACEID b) const {
++    return navigationKey(a) < navigationKey(b);
++}
++
++bool CFullscreenSpaces::isFullscreenWorkspace(WORKSPACEID id) const {
++    return m_spaces.contains(id);
++}
++
++CFullscreenSpaces::SRecord* CFullscreenSpaces::recordOf(PHLWINDOW window) {
++    const auto IT = std::ranges::find_if(m_records, [&](const auto& r) { return r.window == window; });
++    return IT == m_records.end() ? nullptr : &*IT;
++}
++
++void CFullscreenSpaces::scheduleCheck(PHLWINDOW window) {
++    if (m_busy || !window)
++        return;
++
++    // Moves, floating changes and group swaps turn fullscreen off and straight back on;
++    // look once things have settled.
++    if (std::ranges::find(m_pending, window) != m_pending.end())
++        return;
++
++    m_pending.emplace_back(window);
++    g_pEventLoopManager->doLater([this, weak = PHLWINDOWREF{window}] {
++        std::erase_if(m_pending, [&](const auto& w) { return !w || w == weak; });
++        if (const auto WINDOW = weak.lock())
++            check(WINDOW);
++    });
++}
++
++bool CFullscreenSpaces::skip(PHLWINDOW window) const {
++    if (!window->m_workspace || window->m_workspace->m_isSpecialWorkspace || window->onSpecialWorkspace() || window->m_pinned)
++        return true;
++
++    if (isFullscreenWorkspace(window->m_workspace->m_id))
++        return true;
++
++    if (std::ranges::find(m_inPlace, window) != m_inPlace.end())
++        return true;
++
++    if (window->m_ruleApplicator->m_tagKeeper.isTagged("fullscreen-in-place"))
++        return true;
++
++    if (const auto DRAGGED = g_layoutManager->dragController()->target(); DRAGGED && DRAGGED == window->layoutTarget())
++        return true;
++
++    return !window->m_workspace->m_monitor;
++}
++
++void CFullscreenSpaces::check(PHLWINDOW window) {
++    static auto PENABLED = CConfigValue<Config::INTEGER>("misc:fullscreen_own_workspace");
++
++    if (!window->m_isMapped || !window->m_workspace)
++        return;
++
++    const bool FULLSCREEN = Fullscreen::controller()->getFullscreenModes(window).internal == FSMODE_FULLSCREEN;
++    auto*      record     = recordOf(window);
++
++    if (!FULLSCREEN) {
++        std::erase_if(m_inPlace, [&](const auto& w) { return !w || w == window; });
++        if (record) {
++            if (window->m_workspace == record->workspace.lock())
++                leave(window, *record);
++            std::erase_if(m_records, [&](const auto& r) { return r.window == window; });
++        }
++        return;
++    }
++
++    if (record) {
++        // Moved off its workspace while fullscreen: it stays where it was put.
++        if (window->m_workspace != record->workspace.lock()) {
++            m_inPlace.emplace_back(window);
++            std::erase_if(m_records, [&](const auto& r) { return r.window == window; });
++        }
++        return;
++    }
++
++    if (!*PENABLED || skip(window))
++        return;
++
++    enter(window);
++}
++
++void CFullscreenSpaces::enter(PHLWINDOW window) {
++    const auto ORIGIN  = window->m_workspace;
++    const auto MONITOR = ORIGIN->m_monitor.lock();
++    if (!MONITOR)
++        return;
++
++    const auto ID     = State::workspaceState()->nextAvailableNamedWorkspace();
++    const auto SERIAL = ++m_serial;
++
++    // In the order before it exists, so the slide into it goes the right way.
++    m_spaces[ID] = {.origin = ORIGIN->m_id, .serial = SERIAL};
++
++    const auto WORKSPACE = State::workspaceState()->create(ID, MONITOR->m_id, std::format("fullscreen-{}-{}", ORIGIN->m_name, SERIAL), false);
++    if (!WORKSPACE) {
++        m_spaces.erase(ID);
++        return;
++    }
++
++    Log::logger->log(Log::DEBUG, "fullscreen_own_workspace: {} goes fullscreen on {}, after {}", window->m_title, WORKSPACE->m_name, ORIGIN->m_name);
++
++    m_records.push_back({.window = window, .workspace = WORKSPACE, .workspaceID = ID, .originID = ORIGIN->m_id, .originName = ORIGIN->m_name, .monitor = MONITOR});
++
++    const bool SHOWN = MONITOR->m_activeWorkspace == ORIGIN;
++
++    m_busy = true;
++    Desktop::globalWindowController()->moveWindowToWorkspace(window, WORKSPACE);
++    window->alpha(Desktop::View::WINDOW_ALPHA_MOVE_TO_WORKSPACE)->setValueAndWarp(1.F);
++    m_busy = false;
++
++    if (SHOWN) {
++        MONITOR->changeWorkspace(WORKSPACE, false, true);
++        Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_OTHER);
++    }
++}
++
++PHLWORKSPACE CFullscreenSpaces::originOf(const SRecord& record) const {
++    if (const auto ORIGIN = State::workspaceState()->query().id(record.originID).run())
++        return ORIGIN;
++
++    // Its only window was the fullscreen one, so it went away; bring it back as it was.
++    const auto MONITOR = record.monitor.lock();
++    if (!MONITOR)
++        return nullptr;
++
++    return State::workspaceState()->create(record.originID, MONITOR->m_id, record.originName, false);
++}
++
++void CFullscreenSpaces::leave(PHLWINDOW window, SRecord& record) {
++    const auto WORKSPACE = record.workspace.lock();
++    const auto ORIGIN    = originOf(record);
++    if (!ORIGIN || !WORKSPACE)
++        return;
++
++    const auto MONITOR = WORKSPACE->m_monitor.lock();
++    const bool SHOWN   = MONITOR && MONITOR->m_activeWorkspace == WORKSPACE;
++
++    m_busy = true;
++    Desktop::globalWindowController()->moveWindowToWorkspace(window, ORIGIN);
++    window->alpha(Desktop::View::WINDOW_ALPHA_MOVE_TO_WORKSPACE)->setValueAndWarp(1.F);
++    m_busy = false;
++
++    if (SHOWN && ORIGIN->m_monitor == MONITOR) {
++        MONITOR->changeWorkspace(ORIGIN, false, true);
++        Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_OTHER);
++    }
++}
++
++void CFullscreenSpaces::onClose(PHLWINDOW window) {
++    const auto* record = recordOf(window);
++    if (!record)
++        return;
++
++    const auto RECORD = *record;
++    std::erase_if(m_records, [&](const auto& r) { return r.window == window; });
++
++    // Once the window is gone, show where it came from instead of an empty workspace.
++    g_pEventLoopManager->doLater([this, RECORD] {
++        const auto WORKSPACE = RECORD.workspace.lock();
++        const auto MONITOR   = RECORD.monitor.lock();
++        if (!WORKSPACE || !MONITOR || MONITOR->m_activeWorkspace != WORKSPACE || WORKSPACE->getWindowCount() > 0)
++            return;
++
++        if (const auto ORIGIN = originOf(RECORD); ORIGIN && ORIGIN->m_monitor == MONITOR)
++            MONITOR->changeWorkspace(ORIGIN, false, true);
++    });
++}
++
++void CFullscreenSpaces::onOpen(PHLWINDOW window) {
++    if (!window->m_workspace || !isFullscreenWorkspace(window->m_workspace->m_id))
++        return;
++
++    const auto IT = std::ranges::find_if(m_records, [&](const auto& r) { return r.workspaceID == window->m_workspace->m_id; });
++    if (IT == m_records.end())
++        return;
++
++    // The app's own dialogs stay with it; anything else opens where the app came from.
++    const auto OWNER = IT->window.lock();
++    if (OWNER && OWNER->getPID() == window->getPID())
++        return;
++
++    if (const auto ORIGIN = originOf(*IT)) {
++        m_busy = true;
++        Desktop::globalWindowController()->moveWindowToWorkspace(window, ORIGIN);
++        m_busy = false;
++    }
++}
+diff --git a/src/managers/fullscreen/FullscreenSpaces.hpp b/src/managers/fullscreen/FullscreenSpaces.hpp
+new file mode 100644
+index 000000000..ccd1aa18a
+--- /dev/null
++++ b/src/managers/fullscreen/FullscreenSpaces.hpp
+@@ -0,0 +1,69 @@
++#pragma once
++
++#include "../../helpers/memory/Memory.hpp"
++#include "../../desktop/DesktopTypes.hpp"
++#include "../../SharedDefs.hpp"
++#include "../../macros.hpp"
++
++#include <cstdint>
++#include <tuple>
++#include <unordered_map>
++#include <vector>
++
++namespace Fullscreen {
++
++    /*
++        misc:fullscreen_own_workspace: a window that goes truly fullscreen (FSMODE_FULLSCREEN) moves
++        to a workspace of its own, which sits right after the workspace it came from in navigation
++        order (m+1/m-1, swipes, the slide animation). Leaving fullscreen moves it back; closing it
++        returns to the origin and the workspace goes away.
++    */
++    class CFullscreenSpaces {
++      public:
++        CFullscreenSpaces();
++        ~CFullscreenSpaces() = default;
++
++        // Sort key for navigation order: workspaces by ID, each fullscreen workspace right after its origin.
++        std::tuple<WORKSPACEID, int, uint64_t> navigationKey(WORKSPACEID id) const;
++
++        // Whether a comes before b in navigation order. For workspaces that aren't fullscreen
++        // workspaces, the same as a < b.
++        bool navigationBefore(WORKSPACEID a, WORKSPACEID b) const;
++
++        bool isFullscreenWorkspace(WORKSPACEID id) const;
++
++      private:
++        struct SSpace {
++            WORKSPACEID origin = WORKSPACE_INVALID;
++            uint64_t    serial = 0;
++        };
++
++        struct SRecord {
++            PHLWINDOWREF    window;
++            PHLWORKSPACEREF workspace;
++            WORKSPACEID     workspaceID = WORKSPACE_INVALID;
++            WORKSPACEID     originID    = WORKSPACE_INVALID;
++            std::string     originName;
++            PHLMONITORREF   monitor;
++        };
++
++        void                                     scheduleCheck(PHLWINDOW window);
++        void                                     check(PHLWINDOW window);
++        void                                     enter(PHLWINDOW window);
++        void                                     leave(PHLWINDOW window, SRecord& record);
++        void                                     onClose(PHLWINDOW window);
++        void                                     onOpen(PHLWINDOW window);
++        bool                                     skip(PHLWINDOW window) const;
++        PHLWORKSPACE                             originOf(const SRecord& record) const;
++        SRecord*                                 recordOf(PHLWINDOW window);
++
++        std::vector<SRecord>                     m_records;
++        std::unordered_map<WORKSPACEID, SSpace>  m_spaces;
++        std::vector<PHLWINDOWREF>                m_inPlace;
++        std::vector<PHLWINDOWREF>                m_pending;
++        uint64_t                                 m_serial = 0;
++        bool                                     m_busy   = false;
++    };
++
++    UP<CFullscreenSpaces>& spaces();
++}
+diff --git a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+index 6e750b912..4ee6508a6 100644
+--- a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
++++ b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+@@ -8,6 +8,7 @@
+ #include "../../layout/space/Space.hpp"
+ #include "../../layout/algorithm/Algorithm.hpp"
+ #include "../../managers/fullscreen/FullscreenController.hpp"
++#include "../../managers/fullscreen/FullscreenSpaces.hpp"
+ 
+ bool CUnifiedWorkspaceSwipeGesture::isGestureInProgress() {
+     return !!m_workspaceBegin;
+@@ -73,9 +74,13 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+ 
+     m_delta = std::clamp(m_delta, sc<double>(-SWIPEDISTANCE), sc<double>(SWIPEDISTANCE));
+ 
++    // Compared in navigation order, which puts fullscreen workspaces right after their origin.
++    const auto before = [](WORKSPACEID a, WORKSPACEID b) { return Fullscreen::spaces()->navigationBefore(a, b); };
++
+     if ((m_workspaceBegin->m_id == workspaceIDLeft && *PSWIPENEW && (m_delta < 0)) ||
+         (!*PSWIPEWRAP &&
+-         ((m_delta > 0 && m_workspaceBegin->getWindowCount() == 0 && workspaceIDRight <= m_workspaceBegin->m_id) || (m_delta < 0 && m_workspaceBegin->m_id <= workspaceIDLeft)))) {
++         ((m_delta > 0 && m_workspaceBegin->getWindowCount() == 0 && !before(m_workspaceBegin->m_id, workspaceIDRight)) ||
++          (m_delta < 0 && !before(workspaceIDLeft, m_workspaceBegin->m_id))))) {
+ 
+         m_delta = 0;
+         g_pHyprRenderer->damageMonitor(m_monitor.lock());
+@@ -93,7 +98,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     if (m_delta < 0) {
+         const auto PWORKSPACE = State::workspaceState()->query().id(workspaceIDLeft).run();
+ 
+-        if ((!*PSWIPEWRAP && workspaceIDLeft > m_workspaceBegin->m_id) || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && before(m_workspaceBegin->m_id, workspaceIDLeft)) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -133,7 +138,7 @@ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+     } else {
+         const auto PWORKSPACE = State::workspaceState()->query().id(workspaceIDRight).run();
+ 
+-        if ((!*PSWIPEWRAP && workspaceIDRight < m_workspaceBegin->m_id) || !PWORKSPACE) {
++        if ((!*PSWIPEWRAP && before(workspaceIDRight, m_workspaceBegin->m_id)) || !PWORKSPACE) {
+             if (*PSWIPENEW) {
+                 g_pHyprRenderer->damageMonitor(m_monitor.lock());
+ 
+@@ -205,7 +210,7 @@ void CUnifiedWorkspaceSwipeGesture::end() {
+ 
+     // If we've been swiping off the right end with PSWIPENEW enabled, there is
+     // no workspace there yet, and we need to choose an ID for a new one now.
+-    if (workspaceIDRight <= m_workspaceBegin->m_id && *PSWIPENEW && !*PSWIPEWRAP)
++    if (!Fullscreen::spaces()->navigationBefore(m_workspaceBegin->m_id, workspaceIDRight) && *PSWIPENEW && !*PSWIPEWRAP)
+         workspaceIDRight = getWorkspaceIDNameFromString("r+1").id;
+ 
+     auto         PWORKSPACER = State::workspaceState()->query().id(workspaceIDRight).run(); // not guaranteed if PSWIPENEW || PSWIPENUMBER
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index e69d8dda5..d238c1b17 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -30,6 +30,7 @@
+ #include "../animation/WorkspaceAnimationController.hpp"
+ #include "../managers/input/InputManager.hpp"
+ #include "../managers/fullscreen/FullscreenController.hpp"
++#include "../managers/fullscreen/FullscreenSpaces.hpp"
+ #include "../errorOverlay/Overlay.hpp"
+ #include "../layout/LayoutManager.hpp"
+ #include "../layout/space/Space.hpp"
+@@ -1423,17 +1424,27 @@ static bool shouldWraparound(const WORKSPACEID id1, const WORKSPACEID id2) {
+     if (!*PWORKSPACEWRAPAROUND)
+         return false;
+ 
+-    WORKSPACEID lowestID  = INT64_MAX;
+-    WORKSPACEID highestID = INT64_MIN;
++    // In navigation order, so a fullscreen workspace after the last one is the end the animation wraps from.
++    const auto& SPACES = Fullscreen::spaces();
++    const auto  before = [&](WORKSPACEID a, WORKSPACEID b) { return SPACES->navigationBefore(a, b); };
++
++    std::optional<WORKSPACEID> lowestID, highestID;
+ 
+     for (auto const& w : State::workspaceState()->workspaces()) {
+-        if (w->m_id < 0 || w->m_isSpecialWorkspace)
++        if (std::get<0>(SPACES->navigationKey(w->m_id)) < 0 || w->m_isSpecialWorkspace)
+             continue;
+-        lowestID  = std::min(w->m_id, lowestID);
+-        highestID = std::max(w->m_id, highestID);
++        if (!lowestID || before(w->m_id, *lowestID))
++            lowestID = w->m_id;
++        if (!highestID || before(*highestID, w->m_id))
++            highestID = w->m_id;
+     }
+ 
+-    return std::min(id1, id2) == lowestID && std::max(id1, id2) == highestID;
++    if (!lowestID || !highestID)
++        return false;
++
++    const auto LOW  = before(id1, id2) ? id1 : id2;
++    const auto HIGH = LOW == id1 ? id2 : id1;
++    return LOW == *lowestID && HIGH == *highestID;
+ }
+ 
+ void CMonitor::changeWorkspace(const PHLWORKSPACE& pWorkspace, bool internal, bool noMouseMove, bool noFocus) {
+@@ -1468,7 +1479,8 @@ void CMonitor::changeWorkspace(const PHLWORKSPACE& pWorkspace, bool internal, bo
+     pWorkspace->m_visible = true;
+ 
+     if (!internal) {
+-        const auto ANIMTOLEFT = POLDWORKSPACE && (shouldWraparound(pWorkspace->m_id, POLDWORKSPACE->m_id) ^ (pWorkspace->m_id > POLDWORKSPACE->m_id));
++        const auto ANIMTOLEFT = POLDWORKSPACE &&
++            (shouldWraparound(pWorkspace->m_id, POLDWORKSPACE->m_id) ^ Fullscreen::spaces()->navigationBefore(POLDWORKSPACE->m_id, pWorkspace->m_id));
+         const auto ANIMSTYLE  = pWorkspace->m_animationStyle;
+         if (POLDWORKSPACE)
+             Animation::Workspace::startAnimation(POLDWORKSPACE, Animation::Workspace::ANIMATION_TYPE_OUT, ANIMTOLEFT, false, ANIMSTYLE);
+-- 
+2.56.0
+
