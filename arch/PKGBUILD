@@ -83,8 +83,10 @@ source=("$_archive.tar.gz::$url/releases/download/v$pkgver/source-v$pkgver.tar.g
         0009-virtual-monitors-workspaces-0-leaves-numbering-to-th.patch
         0010-virtual-monitors-fixes-from-the-first-run-on-a-NyxOS.patch
         0011-hyprtester-workspace_swipe_wrap-checks-the-0.57-acti.patch
-        0012-fullscreen-misc-fullscreen_own_workspace.patch)
+        0012-fullscreen-misc-fullscreen_own_workspace.patch
+        0013-layers-top-layers-slide-with-the-workspace-when-it-m.patch)
 sha256sums=('34dbec0738ab88c8228caf89385662688ab1601ea58fbe5c60a6b6ab383db46d'
+            SKIP
             SKIP
             SKIP
             SKIP
@@ -113,6 +115,7 @@ prepare() {
 	patch -Np1 -i "$srcdir/0010-virtual-monitors-fixes-from-the-first-run-on-a-NyxOS.patch"
 	patch -Np1 -i "$srcdir/0011-hyprtester-workspace_swipe_wrap-checks-the-0.57-acti.patch"
 	patch -Np1 -i "$srcdir/0012-fullscreen-misc-fullscreen_own_workspace.patch"
+	patch -Np1 -i "$srcdir/0013-layers-top-layers-slide-with-the-workspace-when-it-m.patch"
 	sed -i -e '/^release:/{n;s/-D/-DCMAKE_SKIP_RPATH=ON -D/}' Makefile
 	sed -i -e '/find_package.glaze/s/7...<8 //' {.,hyprpm,start}/CMakeLists.txt
 }

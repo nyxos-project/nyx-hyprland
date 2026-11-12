@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ken Smith <ken@design-nex.us>
+Date: Wed, 11 Nov 2026 18:46:50 -0600
+Subject: [PATCH] layers: top layers slide with the workspace when it meets a
+ fullscreen one
+
+While a workspace with a true fullscreen window and one without are both
+on screen (a workspace swipe, or a workspace slide still animating), the
+top layers that fullscreen hides (bars, docks) are drawn at the offset of
+the workspace without one, at full opacity. A bar leaves with its
+workspace when swiping to a fullscreen app and comes back with it,
+instead of covering the app until the swipe ends and then fading out.
+
+A swipe no longer shows those layers when it starts from a fullscreen
+workspace, and its end sets their opacity at once rather than fading it,
+as they are already where they belong.
+---
+ .../input/UnifiedWorkspaceSwipeGesture.cpp    | 13 ++-----
+ src/render/Renderer.cpp                       | 34 +++++++++++++++++--
+ 2 files changed, 35 insertions(+), 12 deletions(-)
+
+diff --git a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+index 4ee6508a6..35d7f6472 100644
+--- a/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
++++ b/src/managers/input/UnifiedWorkspaceSwipeGesture.cpp
+@@ -27,15 +27,6 @@ void CUnifiedWorkspaceSwipeGesture::begin() {
+     m_monitor        = Desktop::focusState()->monitor();
+     m_avgSpeed       = 0;
+     m_speedPoints    = 0;
+-
+-    const auto FSWINDOW         = Fullscreen::controller()->getFullscreenWindow(PWORKSPACE);
+-    const auto INTERNAL_FS_MODE = FSWINDOW ? Fullscreen::controller()->getFullscreenModes(FSWINDOW).internal : Fullscreen::FSMODE_NONE;
+-
+-    if (INTERNAL_FS_MODE == Fullscreen::FSMODE_FULLSCREEN) {
+-        for (auto const& ls : Desktop::focusState()->monitor()->m_layerSurfaceLayers[2]) {
+-            *ls->alpha()[Desktop::View::LS_ALPHA_FADE] = 1.F;
+-        }
+-    }
+ }
+ 
+ void CUnifiedWorkspaceSwipeGesture::update(double delta) {
+@@ -327,8 +318,10 @@ void CUnifiedWorkspaceSwipeGesture::end() {
+             (!FSWINDOW || !Fullscreen::controller()->layoutManagedFS(FSWINDOW) ||
+              (pSwitchedTo->m_space && pSwitchedTo->m_space->algorithm() && Fullscreen::controller()->hasFullscreen(pSwitchedTo, true)));
+ 
++        // During the swipe, top layers hidden by fullscreen moved with the workspace without a
++        // fullscreen window (see renderLayer), so a fade now would show them over the app.
+         for (auto const& ls : Desktop::focusState()->monitor()->m_layerSurfaceLayers[2]) {
+-            *ls->alpha()[Desktop::View::LS_ALPHA_FADE] = HIDE ? 0.F : 1.F;
++            ls->alpha()[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(HIDE ? 0.F : 1.F);
+         }
+     }
+ }
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 249f08439..dd8ec3e38 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -932,6 +932,30 @@ SP<ITexture> IHyprRenderer::createTexture(const SP<Aquamarine::IBuffer> buffer,
+     return tex;
+ }
+ 
++static std::optional<Vector2D> topLayerSlideOffset(PHLMONITOR pMonitor) {
++    PHLWORKSPACE normal;
++    bool         fullscreen = false;
++
++    for (auto const& ref : State::workspaceState()->workspaces()) {
++        const auto ws = ref.lock();
++        if (!ws || ws->m_isSpecialWorkspace || ws->m_monitor != pMonitor || ws->m_alpha->value() <= 0.F)
++            continue;
++
++        if (ws->m_id != pMonitor->activeWorkspaceID() && !ws->m_forceRendering && !ws->m_renderOffset->isBeingAnimated())
++            continue;
++
++        if (Fullscreen::controller()->getFullscreenModes(ws, true).internal == Fullscreen::FSMODE_FULLSCREEN)
++            fullscreen = true;
++        else if (!normal)
++            normal = ws;
++    }
++
++    if (!fullscreen || !normal)
++        return std::nullopt;
++
++    return normal->m_renderOffset->value();
++}
++
+ void IHyprRenderer::renderLayer(PHLLS pLayer, PHLMONITOR pMonitor, const Time::steady_tp& time, bool popups, bool lockscreen) {
+     if (!pLayer)
+         return;
+@@ -955,11 +979,17 @@ void IHyprRenderer::renderLayer(PHLLS pLayer, PHLMONITOR pMonitor, const Time::s
+ 
+     TRACY_GPU_ZONE("RenderLayer");
+ 
+-    const auto                       REALPOS = pLayer->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
++    // While a workspace with a true fullscreen window slides next to one without, the top
++    // layers that fullscreen hides move with the one without, at full opacity.
++    std::optional<Vector2D> slideOffset;
++    if (pLayer->m_layer == ZWLR_LAYER_SHELL_V1_LAYER_TOP && !pLayer->m_aboveFullscreen && !m_bRenderingSnapshot && !lockscreen)
++        slideOffset = topLayerSlideOffset(pMonitor);
++
++    const auto                       REALPOS = pLayer->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) + slideOffset.value_or(Vector2D{});
+     const auto                       REALSIZ = pLayer->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+ 
+     CSurfacePassElement::SRenderData renderdata = {pMonitor, time, REALPOS};
+-    renderdata.fadeAlpha                        = pLayer->alpha()[LS_ALPHA_FADE]->value();
++    renderdata.fadeAlpha                        = slideOffset ? 1.F : pLayer->alpha()[LS_ALPHA_FADE]->value();
+     renderdata.blur                             = shouldBlur(pLayer);
+     renderdata.surface                          = pLayer->wlSurface()->resource();
+     renderdata.decorate                         = false;
+-- 
+2.56.0
+
