@@ -68,6 +68,26 @@ What has actually run:
 - `virtualMonitorsRejectsBadLayouts` passed the first confirm-timeout revert, then hung
   on the second `count = 3, confirm = 1` change. That is unexplained; reproduce it in a
   safe environment before relying on confirm timeouts.
+- In the NyxOS VM (2026-11-12, 0.57.2), `nyx display virtual enable Virtual-1 --timeout 5`
+  twice without confirming: Hyprland stayed responsive both times (no hang), but neither
+  change reverted; the screen stayed split. `nyx display` and Settings now put the old
+  layout back themselves when nobody keeps a change, so recovery doesn't depend on the
+  compositor's timer. Why the timer doesn't revert is still open.
+
+## Fullscreen workspaces (NyxOS VM, 2026-11-12, 0.57.2)
+
+`misc:fullscreen_own_workspace` on, Foot on workspace 2:
+
+| Check | Result |
+|---|---|
+| Fullscreen | Moves to `fullscreen-2-1`; Hyprland's JSON gives it no `id` |
+| Leave fullscreen | Back on workspace 2, `fullscreen-2-1` gone |
+| Close while fullscreen | Back on workspace 2, no workspace left behind |
+| Dock and Bar while fullscreen | Foot shown running, workspace 2 busy (after nyx-core 94e0c8a, which gives named workspaces an id from their name) |
+| Dock swipe plugin | Loads with permissions enforced |
+
+Not yet checked: mpv, a browser's F11, an XWayland game, a fullscreen app opening a
+dialog, and swiping across a fullscreen workspace with wrap on.
 
 ## Manual checklist (physical ultrawide)
 
