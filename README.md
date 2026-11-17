@@ -30,6 +30,7 @@ release in `patches/<version>/`, with the Arch package (`arch/`) and Hyprland pl
 | 0011 hyprtester: workspace_swipe_wrap checks the 0.57 action | Keeps 0001's test current | hyprtester `gestures.cpp` |
 | 0012 fullscreen: misc:fullscreen_own_workspace | A fullscreened window gets a workspace of its own (`fullscreen-<ws>-<n>`), and goes back when it leaves fullscreen; on by default in NyxOS | new `FullscreenSpaces.*`, compositor, monitor, resolver, gesture, hyprtester `fullscreenSpaces.cpp` |
 | 0013 layers: top layers slide with the workspace | The bar and dock slide away with a workspace swipe into a fullscreen workspace | renderer, gesture |
+| 0014 layers: slide offset once per monitor per frame | 0013's offset worked out once per frame and only with `misc:fullscreen_own_workspace` on; a closing layer keeps its fade | renderer |
 
 [docs/virtual-monitors.md](docs/virtual-monitors.md) describes virtual monitors in
 detail; [docs/testing.md](docs/testing.md) how the series is tested.

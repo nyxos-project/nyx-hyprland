@@ -139,7 +139,7 @@ physical output (DRM)  ← host CMonitor: hidden like a mirror, draws its region
 
 Branch `nyx/0.57.2` in the organization's Hyprland fork
 (https://github.com/nyxos-project/Hyprland), exported to `patches/0.57.2/`. The whole
-series, 0001 to 0013, is in the [README](../README.md); these are the virtual-monitor
+series, 0001 to 0014, is in the [README](../README.md); these are the virtual-monitor
 patches and the gesture they build on:
 
 | Patch | Upstream files touched |
